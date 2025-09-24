@@ -17,6 +17,7 @@ Thumbs.db
 # Secrets
 .env
 .env.*
+sessions.db
 
 # Build / cache / artifacts
 dist/
@@ -29,6 +30,7 @@ pip-wheel-metadata/
 
 # Data & indices
 rag/faiss_index/
+rag/website_data.json
 data/**/raw/
 data/**/tmp/
 *.sqlite
@@ -37,7 +39,7 @@ data/**/tmp/
 # Notebooks outputs
 .ipynb_checkpoints/
 
-# Node (if any UI)
+# Node (if any UI later)
 node_modules/
 
 # Docker local
