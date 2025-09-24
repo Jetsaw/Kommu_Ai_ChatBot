@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+env/
+venv/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Secrets
+.env
+.env.*
+
+# Build / cache / artifacts
+dist/
+build/
+*.log
+logs/
+tmp/
+.cache/
+pip-wheel-metadata/
+
+# Data & indices
+rag/faiss_index/
+data/**/raw/
+data/**/tmp/
+*.sqlite
+*.db
+
+# Notebooks outputs
+.ipynb_checkpoints/
+
+# Node (if any UI)
+node_modules/
+
+# Docker local
+*.local.yml
