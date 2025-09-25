@@ -6,6 +6,7 @@ from xml.sax.saxutils import escape
 from logging.handlers import RotatingFileHandler
 import logging
 import traceback
+from fastapi.responses import HTMLResponse
 
 from config import (
     TZ_REGION, OFFICE_START, OFFICE_END, PORT,
@@ -266,6 +267,48 @@ async def refresh_sheets(request: Request):
 @app.get("/debug/state", response_class=PlainTextResponse)
 async def debug_state():
     return "Sessions stored in SQLite (sessions.db). Use maintainer queries to inspect unanswered Qs."
+
+@app.get("/admin/dashboard", response_class=HTMLResponse)
+async def dashboard(token: str = ""):
+    if token != ADMIN_TOKEN:
+        return PlainTextResponse("Forbidden", status_code=403)
+
+    import sqlite3
+    conn = sqlite3.connect("sessions.db")
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT created_at, user_id, question, answer, status
+        FROM qna_log
+        ORDER BY created_at DESC LIMIT 50
+    """)
+    rows = cur.fetchall()
+    conn.close()
+
+    # Build HTML table
+    html = """
+    <html>
+    <head>
+        <title>Kai Dashboard</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 20px; }
+            table { border-collapse: collapse; width: 100%; }
+            th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }
+            th { background: #f2f2f2; }
+            tr:nth-child(even) { background: #fafafa; }
+        </style>
+    </head>
+    <body>
+        <h2>Kai Chatbot - Live Dashboard</h2>
+        <table>
+            <tr>
+                <th>Time</th><th>User</th><th>Question</th><th>Answer</th><th>Status</th>
+            </tr>
+    """
+    for created_at, user_id, question, answer, status in rows:
+        html += f"<tr><td>{created_at}</td><td>{user_id}</td><td>{question}</td><td>{answer}</td><td>{status}</td></tr>"
+
+    html += "</table></body></html>"
+    return HTMLResponse(content=html)
 
 # ----------------- Webhook -----------------
 @app.post("/webhook")
