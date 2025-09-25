@@ -1,11 +1,10 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse, Response
 from datetime import datetime
-import pytz, re, os, json
+import pytz, re, os, json, traceback
 from xml.sax.saxutils import escape
 from logging.handlers import RotatingFileHandler
 import logging
-import traceback
 
 from config import (
     TZ_REGION, OFFICE_START, OFFICE_END, PORT,
@@ -326,7 +325,7 @@ async def webhook(request: Request):
             return _log_and_twiml(wa_from, body, msg, lang, "live_agent", aft, True)
 
         # -------- Greeting --------
-        if has_any(["hi","hello","start","mula","hai","helo","menu"], lower) and not sess["greeted"]:
+        if has_any(["hi","hello","start","mula","hai","helo","menu"], lower) and not sess.get("greeted"):
             if lang == "BM":
                 msg = ("Hai! Saya Kai - Chatbot Kommu\n"
                        "[Perbualan ini dikendalikan oleh chatbot dan sedang dalam ujian beta. "
@@ -386,17 +385,15 @@ async def webhook(request: Request):
         return _log_and_twiml(wa_from, body, msg, lang, "fallback", aft, False, status="unanswered")
 
     except Exception as e:
-        log.error("[Kai] FATAL in webhook", exc_info=True) 
+        tb = traceback.format_exc()
+        log.error(f"[Kai] FATAL in webhook: {e}\n{tb}")   # full stacktrace
         return _log_and_twiml(
-        wa_from,
-        body if 'body' in locals() else "",
-        "Sorry, internal error. Please try again or type LA.",
-        "EN",
-        "error",
-        False,
-        False,
-        status="error"
-            
-            
-            
+            wa_from if 'wa_from' in locals() else "",
+            body if 'body' in locals() else "",
+            "Sorry, internal error. Please try again or type LA.",
+            "EN",
+            "error",
+            False,
+            False,
+            status="error"
         )
