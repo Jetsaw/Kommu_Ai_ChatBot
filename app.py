@@ -5,6 +5,7 @@ import pytz, re, os, json
 from xml.sax.saxutils import escape
 from logging.handlers import RotatingFileHandler
 import logging
+import traceback
 
 from config import (
     TZ_REGION, OFFICE_START, OFFICE_END, PORT,
@@ -385,5 +386,17 @@ async def webhook(request: Request):
         return _log_and_twiml(wa_from, body, msg, lang, "fallback", aft, False, status="unanswered")
 
     except Exception as e:
-        log.info(f"[Kai] FATAL in webhook: {e}")
-        return _log_and_twiml(wa_from, body if 'body' in locals() else "", "Sorry, internal error. Please try again or type LA.", "EN", "error", False, False, status="error")
+        log.error(f"[Kai] FATAL in webhook: {str(e)}", exc_info=True)   
+        return _log_and_twiml(
+        wa_from,
+        body if 'body' in locals() else "",
+        "Sorry, internal error. Please try again or type LA.",
+        "EN",
+        "error",
+        False,
+        False,
+        status="error"
+            
+            
+            
+        )
