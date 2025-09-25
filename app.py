@@ -25,6 +25,7 @@ from google_sheets import (
 from session_state import get_session, set_lang, freeze, update_reply_state, log_qna
 from web_scraper import scrape as scrape_site
 from fastapi_utils.tasks import repeat_every
+from twilio.rest import Client as TwilioClient
 
 # ----------------- Logging -----------------
 os.makedirs("logs", exist_ok=True)
@@ -234,13 +235,13 @@ def auto_refresh():
 async def health():
     return "Kai alive"
 
-@app.post("/status_callback")
+@app.api_route("/status_callback", methods=["GET","POST"])
 async def status_callback(_: Request):
     return PlainTextResponse("OK")
 
-@app.post("/admin/refresh_sheets")
+@app.api_route("/admin/refresh_sheets", methods=["GET","POST"])
 async def refresh_sheets(request: Request):
-    token = (request.query_params.get("token") or "")
+    token = (request.query_params.get("token") or (await request.form()).get("token") or "")
     if token != ADMIN_TOKEN:
         return PlainTextResponse("Forbidden", status_code=403)
     try:
@@ -324,7 +325,7 @@ async def webhook(request: Request):
             return _log_and_twiml(wa_from, body, msg, lang, "live_agent", aft, True)
 
         # -------- Greeting --------
-        if has_any(["hi","hello","start","mula","hai","helo","menu"], lower):
+        if has_any(["hi","hello","start","mula","hai","helo","menu"], lower) and not sess["greeted"]:
             if lang == "BM":
                 msg = ("Hai! Saya Kai - Chatbot Kommu\n"
                        "[Perbualan ini dikendalikan oleh chatbot dan sedang dalam ujian beta. "
@@ -334,6 +335,7 @@ async def webhook(request: Request):
                        "[The conversation is handled by a chatbot and is under beta testing. "
                        "It is supervised by a human during working hours]")
             if aft: msg += after_hours_suffix(lang)
+            sess["greeted"] = True
             return _log_and_twiml(wa_from, body, msg, lang, "greeting", aft, False)
 
         # -------- Warranty Direct Lookup --------
