@@ -1,19 +1,47 @@
 version: "3.9"
+
 services:
   kai:
     build: .
     restart: unless-stopped
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
     env_file: .env
     environment:
       - PORT=8000
-    
+      - VIRTUAL_HOST=api.kommu.ai
+      - LETSENCRYPT_HOST=api.kommu.ai
+      - LETSENCRYPT_EMAIL=your-email@kommu.ai
     volumes:
       - kai_data:/app/data
       - kai_rag:/app/rag
       - kai_storage:/app/storage
-    
+
+  nginx-proxy:
+    image: jwilder/nginx-proxy:alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/tmp/docker.sock:ro
+      - ./certs:/etc/nginx/certs:ro
+      - ./vhost.d:/etc/nginx/vhost.d
+      - ./html:/usr/share/nginx/html
+
+  letsencrypt:
+    image: jrcs/letsencrypt-nginx-proxy-companion
+    restart: unless-stopped
+    environment:
+      - NGINX_PROXY_CONTAINER=nginx-proxy
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./certs:/etc/nginx/certs
+      - ./vhost.d:/etc/nginx/vhost.d
+      - ./html:/usr/share/nginx/html
+    depends_on:
+      - nginx-proxy
+
 volumes:
   kai_data:
   kai_rag:

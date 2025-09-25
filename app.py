@@ -22,7 +22,6 @@ from sop_doc_loader import fetch_sop_doc_text, parse_qas_from_text
 from google_sheets import (
     fetch_warranty_all, warranty_lookup_by_dongle, warranty_text_from_row
 )
-from twilio.rest import Client as TwilioClient
 from session_state import get_session, set_lang, freeze, update_reply_state, log_qna
 from web_scraper import scrape as scrape_site
 from fastapi_utils.tasks import repeat_every
@@ -231,6 +230,7 @@ def auto_refresh():
 
 # ----------------- Routes -----------------
 @app.get("/", response_class=PlainTextResponse)
+@app.get("/health", response_class=PlainTextResponse)
 async def health():
     return "Kai alive"
 
