@@ -1,0 +1,20 @@
+version: "3.9"
+services:
+  kai:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      - PORT=8000
+    
+    volumes:
+      - kai_data:/app/data
+      - kai_rag:/app/rag
+      - kai_storage:/app/storage
+    
+volumes:
+  kai_data:
+  kai_rag:
+  kai_storage:
