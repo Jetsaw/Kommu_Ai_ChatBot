@@ -386,7 +386,7 @@ async def webhook(request: Request):
         return _log_and_twiml(wa_from, body, msg, lang, "fallback", aft, False, status="unanswered")
 
     except Exception as e:
-        log.error(f"[Kai] FATAL in webhook: {str(e)}", exc_info=True)   
+        log.error("[Kai] FATAL in webhook", exc_info=True) 
         return _log_and_twiml(
         wa_from,
         body if 'body' in locals() else "",
