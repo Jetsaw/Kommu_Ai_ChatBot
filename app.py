@@ -1,10 +1,11 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse, Response
 from datetime import datetime
-import pytz, re, os, json, traceback
+import pytz, re, os, json
 from xml.sax.saxutils import escape
 from logging.handlers import RotatingFileHandler
 import logging
+import traceback
 
 from config import (
     TZ_REGION, OFFICE_START, OFFICE_END, PORT,
@@ -22,7 +23,7 @@ from sop_doc_loader import fetch_sop_doc_text, parse_qas_from_text
 from google_sheets import (
     fetch_warranty_all, warranty_lookup_by_dongle, warranty_text_from_row
 )
-from session_state import get_session, set_lang, freeze, update_reply_state, log_qna
+from session_state import get_session, set_lang, freeze, update_reply_state, log_qna, init_db
 from web_scraper import scrape as scrape_site
 from fastapi_utils.tasks import repeat_every
 from twilio.rest import Client as TwilioClient
@@ -35,6 +36,9 @@ log = logging.getLogger("kai")
 
 DEBUG_QA = os.getenv("DEBUG_QA", "1") == "1"
 app = FastAPI(title="Kai - Kommu Chatbot")
+
+# Init DB schema
+init_db()
 
 # ----------------- Utilities -----------------
 def is_office_hours(now=None):
