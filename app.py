@@ -55,9 +55,6 @@ def norm(text: str) -> str:
 def has_any(words, text: str) -> bool:
     return any(re.search(rf"\b{w}\b", text) for w in words)
 
-def contains_any(text: str, pieces):
-    return any(p in text for p in pieces)
-
 def mentions_brand(text: str) -> bool:
     return bool(re.search(r"\bkommu(?:assist)?\b", text))
 
@@ -99,10 +96,7 @@ def maybe_add_la_hint(user_id, msg, lang):
 # ----------------- CS forwarding -----------------
 def summarize_for_agent(user_text: str, lang: str):
     sys = "You summarize customer WhatsApp issues for internal CS. Output 2-4 lines, no emojis."
-    prompt = (
-        f"Customer message ({'Malay' if lang=='BM' else 'English'}):\n{user_text}\n\n"
-        "Summarize the request, including any car model/variant/year if present."
-    )
+    prompt = f"Customer message ({'Malay' if lang=='BM' else 'English'}):\n{user_text}\n\nSummarize the request."
     s = chat_completion(sys, prompt)
     return (s or user_text).strip()
 
@@ -124,60 +118,20 @@ def run_rag(user_text: str, lang_hint: str = "EN", intent_hint: str | None = Non
     if not rag:
         return ""
     context = rag.build_context(user_text, topk=4)
-
-    intent_guidance = {
-        "about":  ("Briefly explain what Kommu/KommuAssist is and the main benefits. Include exactly one link."),
-        "how":    ("Explain briefly how KommuAssist works. One short paragraph, max one link."),
-        "buy":    ("Buying steps; include https://kommu.ai/products/ and https://kommu.ai/faq/"),
-        "hours":  ("Office hours Mon–Fri 10:00–18:00 MYT, include address and Waze link."),
-        "test_drive": ("Offer test drive link: https://calendly.com/kommuassist/test-drive?month=2025-08"),
-    }
-    guide = intent_guidance.get(intent_hint, "")
-
     sys = (
         "You are Kai, Kommu’s friendly assistant.\n"
         "- Always reply in the user's language (Malay users → BM).\n"
         "- No emojis. No tables. Max 2 links.\n"
         "- Use ONLY the provided context."
     )
-
-    lang_instruction = (
-        "Tulis jawapan 100% dalam Bahasa Melayu (Bahasa Malaysia)."
-        if lang_hint == "BM" else
-        "Write the final answer in English."
-    )
-
-    prompt = (
-        f"User message: {user_text}\n\n"
-        f"Context (top SOP matches):\n{context}\n\n"
-        f"{lang_instruction}\n{guide}\n\n"
-        "Write a concise, helpful answer."
-    )
-
+    lang_instruction = "Tulis jawapan 100% dalam Bahasa Melayu." if lang_hint == "BM" else "Write the final answer in English."
+    prompt = f"User message: {user_text}\n\nContext:\n{context}\n\n{lang_instruction}\nWrite a concise, helpful answer."
     try:
         llm = chat_completion(sys, prompt)
     except Exception as e:
         log.info(f"[Kai] ERR chat_completion: {e}")
         llm = ""
-
-    if llm and llm.strip():
-        out = llm.strip()
-        if lang_hint == "BM" and looks_english(out):
-            fixed = translate_to_bm(out) or out
-            return fixed
-        return out
-
-    # fallback from SOP context
-    top = context.split("\n\n---\n\n")[0].strip() if context else ""
-    a_text = ""
-    for line in top.splitlines():
-        if line.lstrip().lower().startswith("a:"):
-            a_text = line.split(":", 1)[1].strip()
-    links = "Useful links: https://kommu.ai/products/  https://kommu.ai/faq/  https://kommu.ai/support/"
-    return (f"Here’s what I found:\n- {a_text or 'I found a related SOP entry.'}\n\n{links}"
-            if lang_hint=="EN" else
-            f"Baik, ini yang berkaitan:\n- {a_text or 'Rujukan SOP ditemui.'}\n\n{links}")
-
+    return llm.strip() if llm else ""
 # ----------------- RAG load on startup -----------------
 def load_rag():
     global rag
@@ -189,7 +143,6 @@ def load_rag():
         rag = None
 
 rag = None
-
 try:
     if SOP_DOC_URL:
         txt = fetch_sop_doc_text()
@@ -201,8 +154,6 @@ try:
             rebuild_rag()
             load_rag()
             print(f"[SOP-DOC] Loaded {len(qas)} Q/A from Google Doc and rebuilt RAG.")
-        else:
-            print("[SOP-DOC] Parsed 0 Q/A.")
     else:
         load_rag()
     fetch_warranty_all()
@@ -210,7 +161,7 @@ except Exception as e:
     print("[Startup] Error:", e)
 
 @app.on_event("startup")
-@repeat_every(seconds=86400)   # every 24h
+@repeat_every(seconds=86400)
 def auto_refresh():
     try:
         print("[AutoRefresh] Refreshing SOP + website…")
@@ -298,7 +249,6 @@ async def admin_unfreeze(request: Request):
 @app.get("/debug/state", response_class=PlainTextResponse)
 async def debug_state():
     return "Sessions stored in SQLite (sessions.db). Use maintainer queries to inspect unanswered Qs."
-
 # ----------------- Webhook -----------------
 @app.post("/webhook")
 async def webhook(request: Request):
@@ -313,13 +263,19 @@ async def webhook(request: Request):
         media_url = form.get("MediaUrl0") or ""
         if msg_type in {"voice", "audio", "image", "video", "document"} or media_url:
             freeze(wa_from, True, mode="user")
-            forward_to_cs(wa_from, f"⚠️ Unsupported message type received: {msg_type or 'media'}. Escalating.")
-            msg = ("Kami terima mesej berbentuk media (gambar/audio/video) yang tidak disokong. "
-                   "Seorang ejen manusia akan hubungi anda." if is_malay(body) else
-                   "We received a media message (image/audio/video) that is not supported. "
-                   "A live agent will contact you.")
-            return _log_and_twiml(wa_from, body, msg, "BM" if is_malay(body) else "EN",
-                                  "unsupported_media", not is_office_hours(), True)
+            forward_to_cs(wa_from, f"⚠️ Unsupported message type: {msg_type or 'media'}")
+            msg = (
+                "Kami terima mesej media (gambar/audio/video) yang tidak disokong. "
+                "Seorang ejen manusia akan hubungi anda."
+                if is_malay(body)
+                else "We received a media message (image/audio/video) that is not supported. "
+                     "A live agent will contact you."
+            )
+            return _log_and_twiml(
+                wa_from, body, msg,
+                "BM" if is_malay(body) else "EN",
+                "unsupported_media", not is_office_hours(), True
+            )
 
         if not body:
             return _log_and_twiml(wa_from, body, "", "EN", "empty", False, False)
@@ -340,50 +296,80 @@ async def webhook(request: Request):
                 tgt = body.split(" ",1)[1].strip()
                 freeze(tgt, False, mode="user", taken_by=None)
                 return _log_and_twiml(wa_from, body, f"Resumed bot for: {tgt}", "EN", "agent_cmd", aft, False)
-            return _log_and_twiml(wa_from, body, "Agent commands: TAKE +6011xxxx, RESUME +6011xxxx", "EN", "agent_cmd", aft, False)
+            return _log_and_twiml(
+                wa_from, body,
+                "Agent commands: TAKE +6011xxxx, RESUME +6011xxxx",
+                "EN", "agent_cmd", aft, False
+            )
 
         # -------- Frozen Handling --------
         if sess["frozen"]:
-            if sess["frozen_mode"] == "user" and lower in {"resume","unfreeze","sambung"}:
+            if sess["frozen_mode"] == "user" and lower in {"resume", "unfreeze", "sambung"}:
                 freeze(wa_from, False, mode="user")
-                msg = "Bot resumed. How can I help?" if lang!="BM" else "Bot disambung semula. Ada apa yang boleh saya bantu?"
+                msg = (
+                    "Bot resumed. How can I help?"
+                    if lang != "BM"
+                    else "Bot disambung semula. Ada apa yang boleh saya bantu?"
+                )
                 return _log_and_twiml(wa_from, body, msg, lang, "resume", aft, False)
+
             if lang == "BM":
-                msg = ("Ejen akan menghubungi anda sekejap lagi."
-                       "\n\nPautan berguna:\n- FAQ / Sokongan: https://kommu.ai/faq/\n- Kereta Disokong: https://kommu.ai/support/\n"
-                       "- Komuniti FB: https://web.facebook.com/groups/kommu.official/\n- Discord: https://discord.gg/CP9ZpsXWqH")
+                msg = (
+                    "Seorang ejen manusia akan menghubungi anda sekejap lagi."
+                    "\n\nSementara menunggu, anda boleh sertai komuniti kami:"
+                    "\n- FB Group: https://web.facebook.com/groups/kommu.official/"
+                    "\n- Discord: https://discord.gg/CP9ZpsXWqH"
+                    "\n\n👉 Jika anda mahu terus berbual dengan chatbot, taip *resume*."
+                )
             else:
-                msg = ("A live agent will get back to you shortly."
-                       "\n\nUseful links:\n- FAQ / Support: https://kommu.ai/faq/\n- Supported Cars: https://kommu.ai/support/\n"
-                       "- FB Group: https://web.facebook.com/groups/kommu.official/\n- Discord: https://discord.gg/CP9ZpsXWqH")
+                msg = (
+                    "A live agent will get back to you shortly."
+                    "\n\nWhile waiting, you can join our community:"
+                    "\n- FB Group: https://web.facebook.com/groups/kommu.official/"
+                    "\n- Discord: https://discord.gg/CP9ZpsXWqH"
+                    "\n\n👉 If you want to continue chatting with the bot, type *resume*."
+                )
             return _log_and_twiml(wa_from, body, msg, lang, "frozen_ack", aft, True)
 
         # -------- User Requests Live Agent --------
-        if has_any(["la","human","request human"], lower):
+        if has_any(["la", "human", "request human"], lower):
             freeze(wa_from, True, mode="user")
             sm = summarize_for_agent(body, lang)
             forward_to_cs(wa_from, sm)
-            if lang=="BM":
-                msg = ("Seorang ejen manusia akan hubungi anda pada waktu pejabat. Chat dibekukan."
-                       "\n\nPautan berguna:\n- FAQ / Sokongan: https://kommu.ai/faq/\n- Kereta Disokong: https://kommu.ai/support/\n"
-                       "- Komuniti FB: https://web.facebook.com/groups/kommu.official/\n- Discord: https://discord.gg/CP9ZpsXWqH")
+            if lang == "BM":
+                msg = (
+                    "Seorang ejen manusia akan hubungi anda pada waktu pejabat. Chat dibekukan."
+                    "\n\nSementara menunggu, anda boleh sertai komuniti kami:"
+                    "\n- FB Group: https://web.facebook.com/groups/kommu.official/"
+                    "\n- Discord: https://discord.gg/CP9ZpsXWqH"
+                    "\n\n👉 Jika anda mahu terus berbual dengan chatbot, taip *resume*."
+                )
             else:
-                msg = ("A live agent will reach out during office hours. Chat is now frozen."
-                       "\n\nUseful links:\n- FAQ / Support: https://kommu.ai/faq/\n- Supported Cars: https://kommu.ai/support/\n"
-                       "- FB Group: https://web.facebook.com/groups/kommu.official/\n- Discord: https://discord.gg/CP9ZpsXWqH")
+                msg = (
+                    "A live agent will reach out during office hours. Chat is now frozen."
+                    "\n\nWhile waiting, you can join our community:"
+                    "\n- FB Group: https://web.facebook.com/groups/kommu.official/"
+                    "\n- Discord: https://discord.gg/CP9ZpsXWqH"
+                    "\n\n👉 If you want to continue chatting with the bot, type *resume*."
+                )
             return _log_and_twiml(wa_from, body, msg, lang, "live_agent", aft, True)
 
         # -------- Greeting --------
-        if has_any(["hi","hello","start","mula","hai","helo","menu"], lower) and not sess["greeted"]:
+        if has_any(["hi", "hello", "start", "mula", "hai", "helo", "menu"], lower) and not sess["greeted"]:
             if lang == "BM":
-                msg = ("Hai! Saya Kai - Chatbot Kommu\n"
-                       "[Perbualan ini dikendalikan oleh chatbot dan sedang dalam ujian beta. "
-                       "Ia diselia oleh manusia semasa waktu pejabat.]")
+                msg = (
+                    "Hai! Saya Kai - Chatbot Kommu\n"
+                    "[Perbualan ini dikendalikan oleh chatbot dan sedang dalam ujian beta. "
+                    "Ia diselia oleh manusia semasa waktu pejabat.]"
+                )
             else:
-                msg = ("Hi! I'm Kai - Kommu Chatbot\n"
-                       "[The conversation is handled by a chatbot and is under beta testing. "
-                       "It is supervised by a human during working hours]")
-            if aft: msg += after_hours_suffix(lang)
+                msg = (
+                    "Hi! I'm Kai - Kommu Chatbot\n"
+                    "[The conversation is handled by a chatbot and is under beta testing. "
+                    "It is supervised by a human during working hours]"
+                )
+            if aft:
+                msg += after_hours_suffix(lang)
             sess["greeted"] = True
             return _log_and_twiml(wa_from, body, msg, lang, "greeting", aft, False)
 
@@ -391,58 +377,66 @@ async def webhook(request: Request):
         if 6 <= len(lower) <= 20:
             row = warranty_lookup_by_dongle(body)
             if row:
-                msg = (f"Status waranti: {warranty_text_from_row(row)}" if lang=="BM"
-                       else f"Warranty status: {warranty_text_from_row(row)}")
-                if aft: msg += after_hours_suffix(lang)
+                msg = (
+                    f"Status waranti: {warranty_text_from_row(row)}"
+                    if lang == "BM"
+                    else f"Warranty status: {warranty_text_from_row(row)}"
+                )
+                if aft:
+                    msg += after_hours_suffix(lang)
                 msg = maybe_add_la_hint(wa_from, msg, lang)
                 return _log_and_twiml(wa_from, body, msg, lang, "warranty", aft, False)
 
         # -------- Intent-based RAG --------
-        if has_any(["buy","beli","order","purchase","tempah","price","harga"], lower):
+        if has_any(["buy", "beli", "order", "purchase", "tempah", "price", "harga"], lower):
             msg = run_rag(body, lang_hint=lang, intent_hint="buy")
-            if aft: msg += after_hours_suffix(lang)
+            if aft:
+                msg += after_hours_suffix(lang)
             msg = maybe_add_la_hint(wa_from, msg, lang)
             return _log_and_twiml(wa_from, body, msg, lang, "buy", aft, False)
 
-        if has_any(["office","waktu","pejabat","hour","hours","open","close","alamat","address"], lower):
+        if has_any(["office", "waktu", "pejabat", "hour", "hours", "open", "close", "alamat", "address"], lower):
             msg = run_rag(body, lang_hint=lang, intent_hint="hours")
-            if aft: msg += after_hours_suffix(lang)
+            if aft:
+                msg += after_hours_suffix(lang)
             msg = maybe_add_la_hint(wa_from, msg, lang)
             return _log_and_twiml(wa_from, body, msg, lang, "hours", aft, False)
 
-        if has_any(["test","drive","demo","try","pandu","uji","appointment","book"], lower):
+        if has_any(["test", "drive", "demo", "try", "pandu", "uji", "appointment", "book"], lower):
             msg = run_rag(body, lang_hint=lang, intent_hint="test_drive")
-            if aft: msg += after_hours_suffix(lang)
+            if aft:
+                msg += after_hours_suffix(lang)
             msg = maybe_add_la_hint(wa_from, msg, lang)
             return _log_and_twiml(wa_from, body, msg, lang, "test_drive", aft, False)
 
         # -------- Default RAG --------
         answer = run_rag(body, lang_hint=lang)
         if answer:
-            if aft: answer += after_hours_suffix(lang)
+            if aft:
+                answer += after_hours_suffix(lang)
             answer = maybe_add_la_hint(wa_from, answer, lang)
             return _log_and_twiml(wa_from, body, answer, lang, "default", aft, False)
 
         # -------- Hard Fallback --------
-        msg = ("Saya boleh bantu harga, pemasangan, waktu pejabat, waranti, dan pandu uji. "
-               "Cuba: 'Beli Kommu', 'Apa itu Kommu', 'Bagaimana ia berfungsi', 'Waktu pejabat', 'Pandu uji'."
-               if lang=="BM" else
-               "I can help with price, installation, office hours, warranty, and test drives. "
-               "Try: 'Buy Kommu', 'What is Kommu', 'How does it work', 'Office time', 'Test drive'.")
-        if aft: msg += after_hours_suffix(lang)
+        msg = (
+            "Saya boleh bantu harga, pemasangan, waktu pejabat, waranti, dan pandu uji. "
+            "Cuba: 'Beli Kommu', 'Apa itu Kommu', 'Bagaimana ia berfungsi', 'Waktu pejabat', 'Pandu uji'."
+            if lang == "BM"
+            else "I can help with price, installation, office hours, warranty, and test drives. "
+                 "Try: 'Buy Kommu', 'What is Kommu', 'How does it work', 'Office time', 'Test drive'."
+        )
+        if aft:
+            msg += after_hours_suffix(lang)
         msg = maybe_add_la_hint(wa_from, msg, lang)
         return _log_and_twiml(wa_from, body, msg, lang, "fallback", aft, False, status="unanswered")
 
     except Exception as e:
+        import traceback
         tb = traceback.format_exc()
         log.error(f"[Kai] FATAL in webhook: {e}\n{tb}")
         return _log_and_twiml(
             wa_from if 'wa_from' in locals() else "",
             body if 'body' in locals() else "",
             "Sorry, internal error. Please try again or type LA.",
-            "EN",
-            "error",
-            False,
-            False,
-            status="error"
+            "EN", "error", False, False, status="error"
         )
