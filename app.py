@@ -354,24 +354,25 @@ async def webhook(request: Request):
                 )
             return _log_and_twiml(wa_from, body, msg, lang, "live_agent", aft, True)
 
-        # -------- Greeting --------
-        if has_any(["hi", "hello", "start", "mula", "hai", "helo", "menu"], lower) and not sess["greeted"]:
-            if lang == "BM":
-                msg = (
-                    "Hai! Saya Kai - Chatbot Kommu\n"
-                    "[Perbualan ini dikendalikan oleh chatbot dan sedang dalam ujian beta. "
-                    "Ia diselia oleh manusia semasa waktu pejabat.]"
-                )
-            else:
-                msg = (
-                    "Hi! I'm Kai - Kommu Chatbot\n"
-                    "[The conversation is handled by a chatbot and is under beta testing. "
-                    "It is supervised by a human during working hours]"
-                )
-            if aft:
-                msg += after_hours_suffix(lang)
-            sess["greeted"] = True
-            return _log_and_twiml(wa_from, body, msg, lang, "greeting", aft, False)
+        # -------- Greeting (patched: only short messages) --------
+        if not sess["greeted"]:
+            if has_any(["hi", "hello", "start", "mula", "hai", "helo", "menu"], lower) and len(lower.split()) <= 3:
+                if lang == "BM":
+                    msg = (
+                        "Hai! Saya Kai - Chatbot Kommu\n"
+                        "[Perbualan ini dikendalikan oleh chatbot dan sedang dalam ujian beta. "
+                        "Ia diselia oleh manusia semasa waktu pejabat.]"
+                    )
+                else:
+                    msg = (
+                        "Hi! I'm Kai - Kommu Chatbot\n"
+                        "[The conversation is handled by a chatbot and is under beta testing. "
+                        "It is supervised by a human during working hours]"
+                    )
+                if aft:
+                    msg += after_hours_suffix(lang)
+                sess["greeted"] = True
+                return _log_and_twiml(wa_from, body, msg, lang, "greeting", aft, False)
 
         # -------- Warranty Direct Lookup --------
         if 6 <= len(lower) <= 20:
