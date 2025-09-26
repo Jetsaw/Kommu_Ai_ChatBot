@@ -356,8 +356,8 @@ async def webhook(request: Request):
 
         # -------- Greeting (short messages only) --------
         if not sess["greeted"] and has_any(["hi","hello","start","mula","hai","helo","menu"], lower) and len(lower.split()) <= 3:
-            msg = "Hai! Saya Kai - Chatbot Kommu\n[Perbualan ini dikendalikan oleh chatbot dan dalam ujian beta.]" if lang=="BM" else \
-                  "Hi! I'm Kai - Kommu Chatbot\n[The conversation is handled by a chatbot and is under beta testing.]"
+            msg = "Hai! Saya Kai - Chatbot Kommu\n Perbualan ini dikendalikan oleh chatbot dan sedang dalam fasa ujian beta." if lang=="BM" else \
+                  "Hi! I'm Kai - Kommu Chatbot\n The conversation is handled by a chatbot and is under beta testing. It is supervised by a human during working hours"
             if aft: msg += after_hours_suffix(lang)
             sess["greeted"] = True
             return _log_and_twiml(wa_from, body, msg, lang, "greeting", aft, False)
