@@ -4,8 +4,7 @@ from datetime import datetime
 import pytz, re, os, json
 from xml.sax.saxutils import escape
 from logging.handlers import RotatingFileHandler
-import logging
-import traceback
+import logging, traceback
 
 from config import (
     TZ_REGION, OFFICE_START, OFFICE_END, PORT,
@@ -23,7 +22,7 @@ from sop_doc_loader import fetch_sop_doc_text, parse_qas_from_text
 from google_sheets import (
     fetch_warranty_all, warranty_lookup_by_dongle, warranty_text_from_row
 )
-from session_state import get_session, set_lang, freeze, update_reply_state, log_qna, init_db
+from session_state import get_session, set_lang, freeze, update_reply_state, log_qna
 from web_scraper import scrape as scrape_site
 from fastapi_utils.tasks import repeat_every
 from twilio.rest import Client as TwilioClient
@@ -36,9 +35,6 @@ log = logging.getLogger("kai")
 
 DEBUG_QA = os.getenv("DEBUG_QA", "1") == "1"
 app = FastAPI(title="Kai - Kommu Chatbot")
-
-# Init DB schema
-init_db()
 
 # ----------------- Utilities -----------------
 def is_office_hours(now=None):
@@ -87,10 +83,7 @@ def twiml(message: str) -> Response:
 
 def _log_and_twiml(wa_from, asked, answer, lang, intent, after_hours, frozen, status="ok"):
     try:
-        # Save into DB
         log_qna(wa_from, asked, answer, lang, intent, after_hours, frozen, status)
-        # Save into log file for maintainers
-        log.info(f"[CHAT] From={wa_from} | Asked={asked!r} | Answer={answer!r} | Lang={lang} | Intent={intent} | Frozen={frozen} | Status={status}")
     finally:
         return twiml(answer)
 
@@ -266,6 +259,42 @@ async def refresh_sheets(request: Request):
     except Exception as e:
         return PlainTextResponse(f"ERR: {e}", status_code=500)
 
+# ----------------- Admin Endpoints for CS -----------------
+@app.api_route("/admin/freeze", methods=["POST", "GET"])
+async def admin_freeze(request: Request):
+    token = (request.query_params.get("token") or (await request.form()).get("token") or "")
+    user_id = request.query_params.get("user_id") or (await request.form()).get("user_id")
+    mode = request.query_params.get("mode") or (await request.form()).get("mode") or "user"
+
+    if token != ADMIN_TOKEN:
+        return PlainTextResponse("Forbidden", status_code=403)
+    if not user_id:
+        return PlainTextResponse("Missing user_id", status_code=400)
+
+    freeze(user_id, True, mode=mode, taken_by="ADMIN")
+    log.info(f"[ADMIN] Freeze user {user_id} with mode={mode}")
+    return PlainTextResponse("Frozen")
+
+@app.api_route("/admin/unfreeze", methods=["POST", "GET"])
+async def admin_unfreeze(request: Request):
+    token = (request.query_params.get("token") or (await request.form()).get("token") or "")
+    user_id = request.query_params.get("user_id") or (await request.form()).get("user_id")
+    takeover = request.query_params.get("takeover") or (await request.form()).get("takeover") or "bot"
+
+    if token != ADMIN_TOKEN:
+        return PlainTextResponse("Forbidden", status_code=403)
+    if not user_id:
+        return PlainTextResponse("Missing user_id", status_code=400)
+
+    if takeover == "manual":
+        freeze(user_id, False, mode="manual")  # bot stays silent
+        log.info(f"[ADMIN] Unfrozen {user_id} (manual takeover)")
+    else:
+        freeze(user_id, False, mode="user")    # bot resumes
+        log.info(f"[ADMIN] Unfrozen {user_id} (chatbot takeover)")
+
+    return PlainTextResponse(f"Unfrozen ({takeover})")
+
 @app.get("/debug/state", response_class=PlainTextResponse)
 async def debug_state():
     return "Sessions stored in SQLite (sessions.db). Use maintainer queries to inspect unanswered Qs."
@@ -279,6 +308,19 @@ async def webhook(request: Request):
         wa_from = form.get("From") or ""
         log.info(f"[Kai] IN From={wa_from!r} Body={body!r}")
 
+        # -------- Unsupported message types --------
+        msg_type = form.get("MessageType") or ""
+        media_url = form.get("MediaUrl0") or ""
+        if msg_type in {"voice", "audio", "image", "video", "document"} or media_url:
+            freeze(wa_from, True, mode="user")
+            forward_to_cs(wa_from, f"⚠️ Unsupported message type received: {msg_type or 'media'}. Escalating.")
+            msg = ("Kami terima mesej berbentuk media (gambar/audio/video) yang tidak disokong. "
+                   "Seorang ejen manusia akan hubungi anda." if is_malay(body) else
+                   "We received a media message (image/audio/video) that is not supported. "
+                   "A live agent will contact you.")
+            return _log_and_twiml(wa_from, body, msg, "BM" if is_malay(body) else "EN",
+                                  "unsupported_media", not is_office_hours(), True)
+
         if not body:
             return _log_and_twiml(wa_from, body, "", "EN", "empty", False, False)
 
@@ -288,7 +330,7 @@ async def webhook(request: Request):
         set_lang(wa_from, lang)
         aft = not is_office_hours()
 
-        # Agent commands
+        # -------- Agent Commands --------
         if wa_from in AGENT_NUMBERS:
             if lower.startswith("take "):
                 tgt = body.split(" ",1)[1].strip()
@@ -300,7 +342,7 @@ async def webhook(request: Request):
                 return _log_and_twiml(wa_from, body, f"Resumed bot for: {tgt}", "EN", "agent_cmd", aft, False)
             return _log_and_twiml(wa_from, body, "Agent commands: TAKE +6011xxxx, RESUME +6011xxxx", "EN", "agent_cmd", aft, False)
 
-        # Frozen handling
+        # -------- Frozen Handling --------
         if sess["frozen"]:
             if sess["frozen_mode"] == "user" and lower in {"resume","unfreeze","sambung"}:
                 freeze(wa_from, False, mode="user")
@@ -316,7 +358,7 @@ async def webhook(request: Request):
                        "- FB Group: https://web.facebook.com/groups/kommu.official/\n- Discord: https://discord.gg/CP9ZpsXWqH")
             return _log_and_twiml(wa_from, body, msg, lang, "frozen_ack", aft, True)
 
-        # User requests live agent
+        # -------- User Requests Live Agent --------
         if has_any(["la","human","request human"], lower):
             freeze(wa_from, True, mode="user")
             sm = summarize_for_agent(body, lang)
@@ -331,7 +373,7 @@ async def webhook(request: Request):
                        "- FB Group: https://web.facebook.com/groups/kommu.official/\n- Discord: https://discord.gg/CP9ZpsXWqH")
             return _log_and_twiml(wa_from, body, msg, lang, "live_agent", aft, True)
 
-        # Greeting
+        # -------- Greeting --------
         if has_any(["hi","hello","start","mula","hai","helo","menu"], lower) and not sess["greeted"]:
             if lang == "BM":
                 msg = ("Hai! Saya Kai - Chatbot Kommu\n"
@@ -345,7 +387,7 @@ async def webhook(request: Request):
             sess["greeted"] = True
             return _log_and_twiml(wa_from, body, msg, lang, "greeting", aft, False)
 
-        # Warranty lookup
+        # -------- Warranty Direct Lookup --------
         if 6 <= len(lower) <= 20:
             row = warranty_lookup_by_dongle(body)
             if row:
@@ -355,35 +397,33 @@ async def webhook(request: Request):
                 msg = maybe_add_la_hint(wa_from, msg, lang)
                 return _log_and_twiml(wa_from, body, msg, lang, "warranty", aft, False)
 
-        # Intent: buy
+        # -------- Intent-based RAG --------
         if has_any(["buy","beli","order","purchase","tempah","price","harga"], lower):
             msg = run_rag(body, lang_hint=lang, intent_hint="buy")
             if aft: msg += after_hours_suffix(lang)
             msg = maybe_add_la_hint(wa_from, msg, lang)
             return _log_and_twiml(wa_from, body, msg, lang, "buy", aft, False)
 
-        # Intent: hours
         if has_any(["office","waktu","pejabat","hour","hours","open","close","alamat","address"], lower):
             msg = run_rag(body, lang_hint=lang, intent_hint="hours")
             if aft: msg += after_hours_suffix(lang)
             msg = maybe_add_la_hint(wa_from, msg, lang)
             return _log_and_twiml(wa_from, body, msg, lang, "hours", aft, False)
 
-        # Intent: test drive
         if has_any(["test","drive","demo","try","pandu","uji","appointment","book"], lower):
             msg = run_rag(body, lang_hint=lang, intent_hint="test_drive")
             if aft: msg += after_hours_suffix(lang)
             msg = maybe_add_la_hint(wa_from, msg, lang)
             return _log_and_twiml(wa_from, body, msg, lang, "test_drive", aft, False)
 
-        # Default RAG
+        # -------- Default RAG --------
         answer = run_rag(body, lang_hint=lang)
         if answer:
             if aft: answer += after_hours_suffix(lang)
             answer = maybe_add_la_hint(wa_from, answer, lang)
             return _log_and_twiml(wa_from, body, answer, lang, "default", aft, False)
 
-        # Fallback
+        # -------- Hard Fallback --------
         msg = ("Saya boleh bantu harga, pemasangan, waktu pejabat, waranti, dan pandu uji. "
                "Cuba: 'Beli Kommu', 'Apa itu Kommu', 'Bagaimana ia berfungsi', 'Waktu pejabat', 'Pandu uji'."
                if lang=="BM" else
