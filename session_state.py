@@ -48,8 +48,10 @@ def get_session(user_id: str):
     cur.execute("SELECT * FROM sessions WHERE user_id=?", (user_id,))
     row = cur.fetchone()
     if not row:
-        cur.execute("INSERT INTO sessions (user_id, lang, frozen, frozen_mode, reply_count, greeted) VALUES (?,?,?,?,?,?)",
-                    (user_id, None, 0, None, 0, 0))
+        cur.execute("""
+            INSERT INTO sessions (user_id, lang, frozen, frozen_mode, reply_count, greeted)
+            VALUES (?,?,?,?,?,?)
+        """, (user_id, None, 0, None, 0, 0))
         conn.commit()
         cur.execute("SELECT * FROM sessions WHERE user_id=?", (user_id,))
         row = cur.fetchone()
@@ -78,12 +80,17 @@ def update_reply_state(user_id: str):
     conn.commit()
     conn.close()
 
-def log_qna(user_id: str, question: str, answer: str, lang: str, intent: str, after_hours: bool, frozen: bool, status: str):
+def log_qna(user_id: str, question: str, answer: str, lang: str, intent: str,
+            after_hours: bool, frozen: bool, status: str):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("""
     INSERT INTO qna_log (user_id, question, answer, lang, intent, after_hours, frozen, status)
     VALUES (?,?,?,?,?,?,?,?)
-    """, (user_id, question, answer, lang, intent, 1 if after_hours else 0, 1 if frozen else 0, status))
+    """, (user_id, question, answer, lang, intent,
+          1 if after_hours else 0, 1 if frozen else 0, status))
     conn.commit()
     conn.close()
+
+# ----------------- Init on import -----------------
+init_db()
