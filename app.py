@@ -226,6 +226,7 @@ async def admin_freeze(request: Request):
     log.info(f"[ADMIN] Freeze user {user_id} with mode={mode}")
     return PlainTextResponse("Frozen")
 
+
 @app.api_route("/admin/unfreeze", methods=["POST", "GET"])
 async def admin_unfreeze(request: Request):
     token = (request.query_params.get("token") or (await request.form()).get("token") or "")
@@ -246,9 +247,12 @@ async def admin_unfreeze(request: Request):
 
     return PlainTextResponse(f"Unfrozen ({takeover})")
 
+
 @app.get("/debug/state", response_class=PlainTextResponse)
 async def debug_state():
     return "Sessions stored in SQLite (sessions.db). Use maintainer queries to inspect unanswered Qs."
+
+
 # ----------------- Webhook -----------------
 @app.post("/webhook")
 async def webhook(request: Request):
@@ -306,11 +310,7 @@ async def webhook(request: Request):
         if sess["frozen"]:
             if sess["frozen_mode"] == "user" and lower in {"resume", "unfreeze", "sambung"}:
                 freeze(wa_from, False, mode="user")
-                msg = (
-                    "Bot resumed. How can I help?"
-                    if lang != "BM"
-                    else "Bot disambung semula. Ada apa yang boleh saya bantu?"
-                )
+                msg = "Bot resumed. How can I help?" if lang != "BM" else "Bot disambung semula. Ada apa yang boleh saya bantu?"
                 return _log_and_twiml(wa_from, body, msg, lang, "resume", aft, False)
 
             if lang == "BM":
@@ -354,80 +354,53 @@ async def webhook(request: Request):
                 )
             return _log_and_twiml(wa_from, body, msg, lang, "live_agent", aft, True)
 
-        # -------- Greeting (patched: only short messages) --------
-        if not sess["greeted"]:
-            if has_any(["hi", "hello", "start", "mula", "hai", "helo", "menu"], lower) and len(lower.split()) <= 3:
-                if lang == "BM":
-                    msg = (
-                        "Hai! Saya Kai - Chatbot Kommu\n"
-                        "[Perbualan ini dikendalikan oleh chatbot dan sedang dalam ujian beta. "
-                        "Ia diselia oleh manusia semasa waktu pejabat.]"
-                    )
-                else:
-                    msg = (
-                        "Hi! I'm Kai - Kommu Chatbot\n"
-                        "[The conversation is handled by a chatbot and is under beta testing. "
-                        "It is supervised by a human during working hours]"
-                    )
-                if aft:
-                    msg += after_hours_suffix(lang)
-                sess["greeted"] = True
-                return _log_and_twiml(wa_from, body, msg, lang, "greeting", aft, False)
+        # -------- Greeting (short messages only) --------
+        if not sess["greeted"] and has_any(["hi","hello","start","mula","hai","helo","menu"], lower) and len(lower.split()) <= 3:
+            msg = "Hai! Saya Kai - Chatbot Kommu\n[Perbualan ini dikendalikan oleh chatbot dan dalam ujian beta.]" if lang=="BM" else \
+                  "Hi! I'm Kai - Kommu Chatbot\n[The conversation is handled by a chatbot and is under beta testing.]"
+            if aft: msg += after_hours_suffix(lang)
+            sess["greeted"] = True
+            return _log_and_twiml(wa_from, body, msg, lang, "greeting", aft, False)
 
         # -------- Warranty Direct Lookup --------
         if 6 <= len(lower) <= 20:
             row = warranty_lookup_by_dongle(body)
             if row:
-                msg = (
-                    f"Status waranti: {warranty_text_from_row(row)}"
-                    if lang == "BM"
-                    else f"Warranty status: {warranty_text_from_row(row)}"
-                )
-                if aft:
-                    msg += after_hours_suffix(lang)
+                msg = f"Status waranti: {warranty_text_from_row(row)}" if lang=="BM" else f"Warranty status: {warranty_text_from_row(row)}"
+                if aft: msg += after_hours_suffix(lang)
                 msg = maybe_add_la_hint(wa_from, msg, lang)
                 return _log_and_twiml(wa_from, body, msg, lang, "warranty", aft, False)
 
         # -------- Intent-based RAG --------
-        if has_any(["buy", "beli", "order", "purchase", "tempah", "price", "harga"], lower):
+        if has_any(["buy","beli","order","purchase","tempah","price","harga"], lower):
             msg = run_rag(body, lang_hint=lang, intent_hint="buy")
-            if aft:
-                msg += after_hours_suffix(lang)
+            if aft: msg += after_hours_suffix(lang)
             msg = maybe_add_la_hint(wa_from, msg, lang)
             return _log_and_twiml(wa_from, body, msg, lang, "buy", aft, False)
 
-        if has_any(["office", "waktu", "pejabat", "hour", "hours", "open", "close", "alamat", "address"], lower):
+        if has_any(["office","waktu","pejabat","hour","hours","open","close","alamat","address"], lower):
             msg = run_rag(body, lang_hint=lang, intent_hint="hours")
-            if aft:
-                msg += after_hours_suffix(lang)
+            if aft: msg += after_hours_suffix(lang)
             msg = maybe_add_la_hint(wa_from, msg, lang)
             return _log_and_twiml(wa_from, body, msg, lang, "hours", aft, False)
 
-        if has_any(["test", "drive", "demo", "try", "pandu", "uji", "appointment", "book"], lower):
+        if has_any(["test","drive","demo","try","pandu","uji","appointment","book"], lower):
             msg = run_rag(body, lang_hint=lang, intent_hint="test_drive")
-            if aft:
-                msg += after_hours_suffix(lang)
+            if aft: msg += after_hours_suffix(lang)
             msg = maybe_add_la_hint(wa_from, msg, lang)
             return _log_and_twiml(wa_from, body, msg, lang, "test_drive", aft, False)
 
         # -------- Default RAG --------
         answer = run_rag(body, lang_hint=lang)
         if answer:
-            if aft:
-                answer += after_hours_suffix(lang)
+            if aft: answer += after_hours_suffix(lang)
             answer = maybe_add_la_hint(wa_from, answer, lang)
             return _log_and_twiml(wa_from, body, answer, lang, "default", aft, False)
 
         # -------- Hard Fallback --------
-        msg = (
-            "Saya boleh bantu harga, pemasangan, waktu pejabat, waranti, dan pandu uji. "
-            "Cuba: 'Beli Kommu', 'Apa itu Kommu', 'Bagaimana ia berfungsi', 'Waktu pejabat', 'Pandu uji'."
-            if lang == "BM"
-            else "I can help with price, installation, office hours, warranty, and test drives. "
-                 "Try: 'Buy Kommu', 'What is Kommu', 'How does it work', 'Office time', 'Test drive'."
-        )
-        if aft:
-            msg += after_hours_suffix(lang)
+        msg = "Saya boleh bantu harga, pemasangan, waktu pejabat, waranti, dan pandu uji." if lang=="BM" else \
+              "I can help with price, installation, office hours, warranty, and test drives."
+        if aft: msg += after_hours_suffix(lang)
         msg = maybe_add_la_hint(wa_from, msg, lang)
         return _log_and_twiml(wa_from, body, msg, lang, "fallback", aft, False, status="unanswered")
 
