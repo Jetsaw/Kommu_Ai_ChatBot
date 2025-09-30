@@ -1,10 +1,10 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse, Response
 from datetime import datetime
-import pytz, re, os, json
+import pytz, re, os, json, traceback
 from xml.sax.saxutils import escape
 from logging.handlers import RotatingFileHandler
-import logging, traceback
+import logging
 
 from config import (
     TZ_REGION, OFFICE_START, OFFICE_END, PORT,
@@ -36,6 +36,9 @@ log = logging.getLogger("kai")
 DEBUG_QA = os.getenv("DEBUG_QA", "1") == "1"
 app = FastAPI(title="Kai - Kommu Chatbot")
 
+FOOTER_EN = "\n\nNote: I am a chatbot, please send your questions one by one. If you need a live agent, type LA."
+FOOTER_BM = "\n\nNota: Saya chatbot, sila hantar soalan satu demi satu. Jika anda perlukan ejen manusia, taip LA."
+
 # ----------------- Utilities -----------------
 def is_office_hours(now=None):
     tz = pytz.timezone(TZ_REGION)
@@ -55,30 +58,14 @@ def norm(text: str) -> str:
 def has_any(words, text: str) -> bool:
     return any(re.search(rf"\b{w}\b", text) for w in words)
 
-def mentions_brand(text: str) -> bool:
-    return bool(re.search(r"\bkommu(?:assist)?\b", text))
-
-def looks_english(text: str) -> bool:
-    t = f" { (text or '').lower() } "
-    en_hits = sum(w in t for w in [" the ", " and ", " to ", " is ", " are ", " you ", " we ", " will ", " please ", " support "])
-    bm_hits = sum(w in t for w in [" dan ", " ialah ", " anda ", " kami ", " akan ", " sila ", " waktu ", " alamat ", " gantian ", " bahagian "])
-    return en_hits >= 2 and bm_hits == 0
-
-def translate_to_bm(text: str) -> str:
-    sys = "You are a professional Malay translator. Output only the translation in Malay. No extra commentary. No emojis."
-    prompt = f"Terjemahkan ke Bahasa Melayu (Bahasa Malaysia) dengan nada profesional:\n\n{text}"
-    try:
-        out = chat_completion(sys, prompt)
-        return out or ""
-    except:
-        return ""
-
 def twiml(message: str) -> Response:
     body = escape(message or "", {'"': "&quot;", "'": "&apos;"})
     xml = f'<?xml version="1.0" encoding="UTF-8"?><Response><Message>{body}</Message></Response>'
     return Response(content=xml, media_type="text/xml; charset=utf-8")
 
 def _log_and_twiml(wa_from, asked, answer, lang, intent, after_hours, frozen, status="ok"):
+    footer = FOOTER_BM if lang == "BM" else FOOTER_EN
+    answer = (answer or "").rstrip() + footer
     try:
         log_qna(wa_from, asked, answer, lang, intent, after_hours, frozen, status)
     finally:
@@ -90,7 +77,7 @@ def maybe_add_la_hint(user_id, msg, lang):
     sess = get_session(user_id)
     if sess["reply_count"] >= 2:
         hint = " Jika perlu ejen manusia, taip LA." if lang=="BM" else " If you need a live agent, type LA."
-        msg += hint
+        msg += "\n" + hint
     return msg
 
 # ----------------- CS forwarding -----------------
@@ -119,19 +106,18 @@ def run_rag(user_text: str, lang_hint: str = "EN", intent_hint: str | None = Non
         return ""
     context = rag.build_context(user_text, topk=4)
     sys = (
-        "You are Kai, Kommu’s friendly assistant.\n"
-        "- Always reply in the user's language (Malay users → BM).\n"
-        "- No emojis. No tables. Max 2 links.\n"
-        "- Use ONLY the provided context."
+        "You are Kai, Kommu’s assistant.\n"
+        "- Reply only from context.\n- No emojis. Max 2 links."
     )
-    lang_instruction = "Tulis jawapan 100% dalam Bahasa Melayu." if lang_hint == "BM" else "Write the final answer in English."
-    prompt = f"User message: {user_text}\n\nContext:\n{context}\n\n{lang_instruction}\nWrite a concise, helpful answer."
+    lang_instruction = "Jawab dalam BM." if lang_hint == "BM" else "Answer in English."
+    prompt = f"User: {user_text}\n\nContext:\n{context}\n\n{lang_instruction}"
     try:
         llm = chat_completion(sys, prompt)
     except Exception as e:
         log.info(f"[Kai] ERR chat_completion: {e}")
         llm = ""
     return llm.strip() if llm else ""
+
 # ----------------- RAG load on startup -----------------
 def load_rag():
     global rag
@@ -169,7 +155,6 @@ def auto_refresh():
             txt = fetch_sop_doc_text()
             qas = parse_qas_from_text(txt)
             if qas:
-                os.makedirs(RAG_DIR, exist_ok=True)
                 with open(SOP_JSON_PATH,"w",encoding="utf-8") as f:
                     json.dump(qas,f,ensure_ascii=False,indent=2)
                 rebuild_rag()
@@ -200,7 +185,6 @@ async def refresh_sheets(request: Request):
             txt = fetch_sop_doc_text()
             qas = parse_qas_from_text(txt)
             if qas:
-                os.makedirs(RAG_DIR, exist_ok=True)
                 with open(SOP_JSON_PATH, "w", encoding="utf-8") as f:
                     json.dump(qas, f, ensure_ascii=False, indent=2)
                 rebuild_rag()
@@ -226,7 +210,6 @@ async def admin_freeze(request: Request):
     log.info(f"[ADMIN] Freeze user {user_id} with mode={mode}")
     return PlainTextResponse("Frozen")
 
-
 @app.api_route("/admin/unfreeze", methods=["POST", "GET"])
 async def admin_unfreeze(request: Request):
     token = (request.query_params.get("token") or (await request.form()).get("token") or "")
@@ -239,19 +222,13 @@ async def admin_unfreeze(request: Request):
         return PlainTextResponse("Missing user_id", status_code=400)
 
     if takeover == "manual":
-        freeze(user_id, False, mode="manual")  # bot stays silent
+        freeze(user_id, False, mode="manual")
         log.info(f"[ADMIN] Unfrozen {user_id} (manual takeover)")
     else:
-        freeze(user_id, False, mode="user")    # bot resumes
+        freeze(user_id, False, mode="user")
         log.info(f"[ADMIN] Unfrozen {user_id} (chatbot takeover)")
 
     return PlainTextResponse(f"Unfrozen ({takeover})")
-
-
-@app.get("/debug/state", response_class=PlainTextResponse)
-async def debug_state():
-    return "Sessions stored in SQLite (sessions.db). Use maintainer queries to inspect unanswered Qs."
-
 
 # ----------------- Webhook -----------------
 @app.post("/webhook")
@@ -262,24 +239,16 @@ async def webhook(request: Request):
         wa_from = form.get("From") or ""
         log.info(f"[Kai] IN From={wa_from!r} Body={body!r}")
 
-        # -------- Unsupported message types --------
+        # Unsupported message types
         msg_type = form.get("MessageType") or ""
         media_url = form.get("MediaUrl0") or ""
-        if msg_type in {"voice", "audio", "image", "video", "document"} or media_url:
+        if msg_type in {"voice","audio","image","video","document"} or media_url:
             freeze(wa_from, True, mode="user")
-            forward_to_cs(wa_from, f"⚠️ Unsupported message type: {msg_type or 'media'}")
-            msg = (
-                "Kami terima mesej media (gambar/audio/video) yang tidak disokong. "
-                "Seorang ejen manusia akan hubungi anda."
-                if is_malay(body)
-                else "We received a media message (image/audio/video) that is not supported. "
-                     "A live agent will contact you."
-            )
-            return _log_and_twiml(
-                wa_from, body, msg,
-                "BM" if is_malay(body) else "EN",
-                "unsupported_media", not is_office_hours(), True
-            )
+            forward_to_cs(wa_from, f"Unsupported: {msg_type or 'media'}")
+            msg = "Kami terima mesej media yang tidak disokong. Ejen akan hubungi anda." if is_malay(body) else \
+                  "We received a media message that is not supported. A live agent will contact you."
+            return _log_and_twiml(wa_from, body, msg, "BM" if is_malay(body) else "EN",
+                                  "unsupported_media", not is_office_hours(), True)
 
         if not body:
             return _log_and_twiml(wa_from, body, "", "EN", "empty", False, False)
@@ -290,122 +259,62 @@ async def webhook(request: Request):
         set_lang(wa_from, lang)
         aft = not is_office_hours()
 
-        # -------- Agent Commands --------
-        if wa_from in AGENT_NUMBERS:
-            if lower.startswith("take "):
-                tgt = body.split(" ",1)[1].strip()
-                freeze(tgt, True, mode="agent", taken_by=wa_from)
-                return _log_and_twiml(wa_from, body, f"Taken & frozen: {tgt}", "EN", "agent_cmd", aft, True)
-            if lower.startswith("resume "):
-                tgt = body.split(" ",1)[1].strip()
-                freeze(tgt, False, mode="user", taken_by=None)
-                return _log_and_twiml(wa_from, body, f"Resumed bot for: {tgt}", "EN", "agent_cmd", aft, False)
-            return _log_and_twiml(
-                wa_from, body,
-                "Agent commands: TAKE +6011xxxx, RESUME +6011xxxx",
-                "EN", "agent_cmd", aft, False
-            )
-
-        # -------- Frozen Handling --------
+        # Frozen Handling
         if sess["frozen"]:
-            if sess["frozen_mode"] == "user" and lower in {"resume", "unfreeze", "sambung"}:
+            if sess["frozen_mode"] == "user" and lower in {"resume","unfreeze","sambung"}:
                 freeze(wa_from, False, mode="user")
-                msg = "Bot resumed. How can I help?" if lang != "BM" else "Bot disambung semula. Ada apa yang boleh saya bantu?"
+                msg = "Bot resumed. How can I help?" if lang != "BM" else \
+                      "Bot disambung semula. Ada apa yang boleh saya bantu?"
                 return _log_and_twiml(wa_from, body, msg, lang, "resume", aft, False)
 
-            if lang == "BM":
-                msg = (
-                    "Seorang ejen manusia akan menghubungi anda sekejap lagi."
-                    "\n\nSementara menunggu, anda boleh sertai komuniti kami:"
-                    "\n- FB Group: https://web.facebook.com/groups/kommu.official/"
-                    "\n- Discord: https://discord.gg/CP9ZpsXWqH"
-                    "\n\n👉 Jika anda mahu terus berbual dengan chatbot, taip *resume*."
-                )
-            else:
-                msg = (
-                    "A live agent will get back to you shortly."
-                    "\n\nWhile waiting, you can join our community:"
-                    "\n- FB Group: https://web.facebook.com/groups/kommu.official/"
-                    "\n- Discord: https://discord.gg/CP9ZpsXWqH"
-                    "\n\n👉 If you want to continue chatting with the bot, type *resume*."
-                )
+            msg = ("Seorang ejen manusia akan menghubungi anda.\n\n👉 Taip *resume* untuk terus berbual dengan bot."
+                   if lang=="BM" else
+                   "A live agent will get back to you.\n\n👉 Type *resume* if you want to continue with the bot.")
             return _log_and_twiml(wa_from, body, msg, lang, "frozen_ack", aft, True)
 
-        # -------- User Requests Live Agent --------
-        if has_any(["la", "human", "request human"], lower):
+        # Live Agent request
+        if has_any(["la","human","request human"], lower):
             freeze(wa_from, True, mode="user")
             sm = summarize_for_agent(body, lang)
             forward_to_cs(wa_from, sm)
-            if lang == "BM":
-                msg = (
-                    "Seorang ejen manusia akan hubungi anda pada waktu pejabat. Chat dibekukan."
-                    "\n\nSementara menunggu, anda boleh sertai komuniti kami:"
-                    "\n- FB Group: https://web.facebook.com/groups/kommu.official/"
-                    "\n- Discord: https://discord.gg/CP9ZpsXWqH"
-                    "\n\n👉 Jika anda mahu terus berbual dengan chatbot, taip *resume*."
-                )
-            else:
-                msg = (
-                    "A live agent will reach out during office hours. Chat is now frozen."
-                    "\n\nWhile waiting, you can join our community:"
-                    "\n- FB Group: https://web.facebook.com/groups/kommu.official/"
-                    "\n- Discord: https://discord.gg/CP9ZpsXWqH"
-                    "\n\n👉 If you want to continue chatting with the bot, type *resume*."
-                )
+            msg = "Seorang ejen manusia akan hubungi anda." if lang=="BM" else "A live agent will reach you."
             return _log_and_twiml(wa_from, body, msg, lang, "live_agent", aft, True)
 
-        # -------- Greeting (short messages only) --------
-        if not sess["greeted"] and has_any(["hi","hello","start","mula","hai","helo","menu"], lower) and len(lower.split()) <= 3:
-            msg = "Hai! Saya Kai - Chatbot Kommu\n Perbualan ini dikendalikan oleh chatbot dan sedang dalam fasa ujian beta." if lang=="BM" else \
-                  "Hi! I'm Kai - Kommu Chatbot\n The conversation is handled by a chatbot and is under beta testing. It is supervised by a human during working hours"
+        # Greeting (only short)
+        if not sess["greeted"] and has_any(["hi","hello","hai","helo","mula","start","menu"], lower) and len(lower.split()) <= 3:
+            msg = ("Hai! Saya Kai - Chatbot Kommu\nPerbualan ini dikendalikan oleh chatbot beta."
+                   if lang=="BM" else
+                   "Hi! I'm Kai - Kommu Chatbot\nThis conversation is handled by a chatbot (beta).")
             if aft: msg += after_hours_suffix(lang)
             sess["greeted"] = True
             return _log_and_twiml(wa_from, body, msg, lang, "greeting", aft, False)
 
-        # -------- Warranty Direct Lookup --------
+        # Warranty lookup
         if 6 <= len(lower) <= 20:
             row = warranty_lookup_by_dongle(body)
             if row:
-                msg = f"Status waranti: {warranty_text_from_row(row)}" if lang=="BM" else f"Warranty status: {warranty_text_from_row(row)}"
+                msg = f"Status waranti: {warranty_text_from_row(row)}" if lang=="BM" else \
+                      f"Warranty status: {warranty_text_from_row(row)}"
                 if aft: msg += after_hours_suffix(lang)
                 msg = maybe_add_la_hint(wa_from, msg, lang)
                 return _log_and_twiml(wa_from, body, msg, lang, "warranty", aft, False)
 
-        # -------- Intent-based RAG --------
-        if has_any(["buy","beli","order","purchase","tempah","price","harga"], lower):
-            msg = run_rag(body, lang_hint=lang, intent_hint="buy")
-            if aft: msg += after_hours_suffix(lang)
-            msg = maybe_add_la_hint(wa_from, msg, lang)
-            return _log_and_twiml(wa_from, body, msg, lang, "buy", aft, False)
-
-        if has_any(["office","waktu","pejabat","hour","hours","open","close","alamat","address"], lower):
-            msg = run_rag(body, lang_hint=lang, intent_hint="hours")
-            if aft: msg += after_hours_suffix(lang)
-            msg = maybe_add_la_hint(wa_from, msg, lang)
-            return _log_and_twiml(wa_from, body, msg, lang, "hours", aft, False)
-
-        if has_any(["test","drive","demo","try","pandu","uji","appointment","book"], lower):
-            msg = run_rag(body, lang_hint=lang, intent_hint="test_drive")
-            if aft: msg += after_hours_suffix(lang)
-            msg = maybe_add_la_hint(wa_from, msg, lang)
-            return _log_and_twiml(wa_from, body, msg, lang, "test_drive", aft, False)
-
-        # -------- Default RAG --------
+        # RAG default
         answer = run_rag(body, lang_hint=lang)
         if answer:
             if aft: answer += after_hours_suffix(lang)
             answer = maybe_add_la_hint(wa_from, answer, lang)
             return _log_and_twiml(wa_from, body, answer, lang, "default", aft, False)
 
-        # -------- Hard Fallback --------
-        msg = "Saya boleh bantu harga, pemasangan, waktu pejabat, waranti, dan pandu uji." if lang=="BM" else \
-              "I can help with price, installation, office hours, warranty, and test drives."
+        # Hard fallback
+        msg = ("Saya boleh bantu harga, pemasangan, waktu pejabat, waranti, dan pandu uji."
+               if lang=="BM" else
+               "I can help with price, installation, office hours, warranty, and test drives.")
         if aft: msg += after_hours_suffix(lang)
         msg = maybe_add_la_hint(wa_from, msg, lang)
         return _log_and_twiml(wa_from, body, msg, lang, "fallback", aft, False, status="unanswered")
 
     except Exception as e:
-        import traceback
         tb = traceback.format_exc()
         log.error(f"[Kai] FATAL in webhook: {e}\n{tb}")
         return _log_and_twiml(
