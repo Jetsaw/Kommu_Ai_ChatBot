@@ -23,7 +23,7 @@ from google_sheets import (
 from session_state import get_session, set_lang, freeze, update_reply_state, log_qna
 from web_scraper import scrape as scrape_site
 from fastapi_utils.tasks import repeat_every
-
+from session_state import init_db
 # ----------------- Logging -----------------
 os.makedirs("logs", exist_ok=True)
 handler = RotatingFileHandler("logs/kai.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8")
@@ -138,6 +138,9 @@ except Exception as e:
     print("[Startup] Error:", e)
 
 @app.on_event("startup")
+def startup_event():
+    init_db()
+    log.info("[Kai] sessions.db initialized")
 @repeat_every(seconds=86400)
 def auto_refresh():
     try:
