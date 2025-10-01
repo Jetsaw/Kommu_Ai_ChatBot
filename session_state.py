@@ -1,12 +1,9 @@
+# session_state.py
 import sqlite3
 import os
 
 DB_PATH = "sessions.db"
 
-def _normalize_user_id(user_id: str) -> str:
-    return user_id.replace("whatsapp:", "").strip()
-
-# ----------------- Init -----------------
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -39,7 +36,6 @@ def init_db():
 
 # ----------------- Session helpers -----------------
 def get_session(user_id: str):
-    user_id = _normalize_user_id(user_id)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
@@ -55,7 +51,6 @@ def get_session(user_id: str):
     return dict(row)
 
 def set_lang(user_id: str, lang: str):
-    user_id = _normalize_user_id(user_id)
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("UPDATE sessions SET lang=? WHERE user_id=?", (lang, user_id))
@@ -63,7 +58,6 @@ def set_lang(user_id: str, lang: str):
     conn.close()
 
 def freeze(user_id: str, frozen: bool, mode: str = "user", taken_by: str | None = None):
-    user_id = _normalize_user_id(user_id)
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("UPDATE sessions SET frozen=?, frozen_mode=? WHERE user_id=?",
@@ -72,7 +66,6 @@ def freeze(user_id: str, frozen: bool, mode: str = "user", taken_by: str | None 
     conn.close()
 
 def update_reply_state(user_id: str):
-    user_id = _normalize_user_id(user_id)
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("UPDATE sessions SET reply_count=reply_count+1 WHERE user_id=?", (user_id,))
@@ -80,7 +73,6 @@ def update_reply_state(user_id: str):
     conn.close()
 
 def log_qna(user_id: str, question: str, answer: str, lang: str, intent: str, after_hours: bool, frozen: bool, status: str):
-    user_id = _normalize_user_id(user_id)
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("""
@@ -89,3 +81,6 @@ def log_qna(user_id: str, question: str, answer: str, lang: str, intent: str, af
     """, (user_id, question, answer, lang, intent, 1 if after_hours else 0, 1 if frozen else 0, status))
     conn.commit()
     conn.close()
+
+# Initialize DB automatically
+init_db()

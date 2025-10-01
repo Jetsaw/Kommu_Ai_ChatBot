@@ -20,10 +20,10 @@ from sop_doc_loader import fetch_sop_doc_text, parse_qas_from_text
 from google_sheets import (
     fetch_warranty_all, warranty_lookup_by_dongle, warranty_text_from_row
 )
-from session_state import get_session, set_lang, freeze, update_reply_state, log_qna
+from session_state import get_session, set_lang, freeze, update_reply_state, log_qna, init_db
 from web_scraper import scrape as scrape_site
 from fastapi_utils.tasks import repeat_every
-from session_state import init_db
+
 # ----------------- Logging -----------------
 os.makedirs("logs", exist_ok=True)
 handler = RotatingFileHandler("logs/kai.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8")
@@ -31,10 +31,11 @@ logging.basicConfig(level=logging.INFO, handlers=[handler])
 log = logging.getLogger("kai")
 
 DEBUG_QA = os.getenv("DEBUG_QA", "1") == "1"
-VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "Kommu_Bot")
 
-WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
-WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID", "")
+# ----------------- Meta Cloud API Vars -----------------
+VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "Kommu_Bot")
+WHATSAPP_TOKEN = os.getenv("META_PERMANENT_TOKEN", "")
+WHATSAPP_PHONE_ID = os.getenv("META_PHONE_NUMBER_ID", "")
 
 app = FastAPI(title="Kai - Kommu Chatbot")
 
@@ -137,10 +138,12 @@ try:
 except Exception as e:
     print("[Startup] Error:", e)
 
+# ----------------- Startup Events -----------------
 @app.on_event("startup")
 def startup_event():
-    init_db()
+    init_db()  # make sure sessions.db is created with "sessions" table
     log.info("[Kai] sessions.db initialized")
+
 @repeat_every(seconds=86400)
 def auto_refresh():
     try:
@@ -176,12 +179,13 @@ async def verify_webhook(
         return PlainTextResponse(hub_challenge)
     return PlainTextResponse("Forbidden", status_code=403)
 
-# Admin freeze/unfreeze
+# ----------------- Admin freeze/unfreeze -----------------
 @app.api_route("/admin/freeze", methods=["POST", "GET"])
 async def admin_freeze(request: Request):
     token = (request.query_params.get("token") or (await request.form()).get("token") or "")
     user_id = request.query_params.get("user_id") or (await request.form()).get("user_id")
-    if token != ADMIN_TOKEN: return PlainTextResponse("Forbidden", 403)
+    if token != ADMIN_TOKEN: 
+        return PlainTextResponse("Forbidden", 403)
     freeze(user_id, True, mode="admin")
     return PlainTextResponse("Frozen")
 
@@ -189,7 +193,8 @@ async def admin_freeze(request: Request):
 async def admin_unfreeze(request: Request):
     token = (request.query_params.get("token") or (await request.form()).get("token") or "")
     user_id = request.query_params.get("user_id") or (await request.form()).get("user_id")
-    if token != ADMIN_TOKEN: return PlainTextResponse("Forbidden", 403)
+    if token != ADMIN_TOKEN: 
+        return PlainTextResponse("Forbidden", 403)
     freeze(user_id, False, mode="user")
     return PlainTextResponse("Unfrozen")
 # ----------------- Webhook POST -----------------
@@ -214,57 +219,101 @@ async def webhook(request: Request):
         if msg_type == "text":
             body = msg["text"]["body"].strip()
         else:
+            # Unsupported media → freeze + escalate
             freeze(wa_from, True, mode="user")
-            send_whatsapp_message(wa_from, "Unsupported media. A live agent will contact you.")
+            send_whatsapp_message(
+                wa_from,
+                "Unsupported media (image/audio/video/document). A live agent will contact you."
+            )
             return JSONResponse({"status": "unsupported"})
 
+        # Normalize text & session
         lower = norm(body)
         sess = get_session(wa_from)
         lang = sess["lang"] or ("BM" if is_malay(body) else "EN")
         set_lang(wa_from, lang)
         aft = not is_office_hours()
 
-        # Resume
+        # -------- Frozen Handling --------
         if sess["frozen"]:
             if lower in {"resume","unfreeze","sambung"}:
                 freeze(wa_from, False, mode="user")
-                msg_out = "Bot resumed. How can I help?" if lang=="EN" else "Bot disambung semula. Ada apa yang boleh saya bantu?"
+                msg_out = "Bot resumed. How can I help?" if lang=="EN" else \
+                          "Bot disambung semula. Ada apa yang boleh saya bantu?"
                 send_whatsapp_message(wa_from, add_footer(msg_out, lang))
                 return JSONResponse({"status": "resumed"})
-            send_whatsapp_message(wa_from, add_footer("A live agent will assist you soon.", lang))
+            send_whatsapp_message(
+                wa_from,
+                add_footer(
+                    "A live agent will assist you soon." if lang=="EN" else
+                    "Seorang ejen manusia akan membantu anda tidak lama lagi.",
+                    lang
+                )
+            )
             return JSONResponse({"status": "frozen"})
 
-        # Request agent
-        if has_any(["la","human"], lower):
+        # -------- Live Agent Request --------
+        if has_any(["la","human","agent","request human"], lower):
             freeze(wa_from, True, mode="user")
-            send_whatsapp_message(wa_from, add_footer("A live agent will reach you.", lang))
+            send_whatsapp_message(
+                wa_from,
+                add_footer(
+                    "A live agent will reach you during office hours." if lang=="EN" else
+                    "Seorang ejen manusia akan hubungi anda pada waktu pejabat.",
+                    lang
+                )
+            )
             return JSONResponse({"status": "agent"})
 
-        # Greeting
-        if not sess["greeted"] and has_any(["hi","hello","hai","helo","mula","start","menu"], lower):
-            msg_out = "Hai! Saya Kai - Chatbot Kommu" if lang=="BM" else "Hi! I'm Kai - Kommu Chatbot"
+        # -------- Greeting --------
+        if not sess["greeted"] and has_any(
+            ["hi","hello","hai","helo","mula","start","menu"], lower
+        ) and len(lower.split()) <= 3:
+            msg_out = (
+                "Hai! Saya Kai - Chatbot Kommu\n[Perbualan ini dikendalikan oleh chatbot beta, "
+                "diselia oleh manusia semasa waktu pejabat.]"
+                if lang=="BM" else
+                "Hi! I'm Kai - Kommu Chatbot\n[This conversation is handled by a chatbot (beta), "
+                "supervised by a human during office hours.]"
+            )
+            if aft: msg_out += after_hours_suffix(lang)
             sess["greeted"] = True
             send_whatsapp_message(wa_from, add_footer(msg_out, lang))
             return JSONResponse({"status": "greeted"})
 
-        # Warranty check
-        if 6 <= len(lower) <= 20:
+        # -------- Warranty Lookup --------
+        if 6 <= len(lower) <= 20:  # likely serial/dongle
             row = warranty_lookup_by_dongle(body)
             if row:
-                msg_out = f"Status waranti: {warranty_text_from_row(row)}" if lang=="BM" else f"Warranty status: {warranty_text_from_row(row)}"
+                msg_out = (
+                    f"Status waranti: {warranty_text_from_row(row)}" if lang=="BM" else
+                    f"Warranty status: {warranty_text_from_row(row)}"
+                )
+                if aft: msg_out += after_hours_suffix(lang)
+                msg_out = maybe_add_la_hint(wa_from, msg_out, lang)
                 send_whatsapp_message(wa_from, add_footer(msg_out, lang))
                 return JSONResponse({"status": "warranty"})
 
-        # RAG
+        # -------- RAG Default --------
         answer = run_rag(body, lang_hint=lang)
         if answer:
+            if aft: answer += after_hours_suffix(lang)
+            answer = maybe_add_la_hint(wa_from, answer, lang)
             send_whatsapp_message(wa_from, add_footer(answer, lang))
             return JSONResponse({"status": "answered"})
 
-        # Fallback
-        msg_out = "Saya boleh bantu harga, pemasangan, waktu pejabat, waranti, dan pandu uji." if lang=="BM" else "I can help with price, installation, office hours, warranty, and test drives."
+        # -------- Hard Fallback --------
+        msg_out = (
+            "Saya boleh bantu harga, pemasangan, waktu pejabat, waranti, dan pandu uji. "
+            "Contoh: 'Beli Kommu', 'Apa itu Kommu', 'Bagaimana ia berfungsi'."
+            if lang=="BM"
+            else "I can help with price, installation, office hours, warranty, and test drives. "
+                 "Try: 'Buy Kommu', 'What is Kommu', 'How does it work'."
+        )
+        if aft: msg_out += after_hours_suffix(lang)
+        msg_out = maybe_add_la_hint(wa_from, msg_out, lang)
         send_whatsapp_message(wa_from, add_footer(msg_out, lang))
-        return JSONResponse({"status": "fallback"})
+        return JSONResponse({"status": "fallback", "unanswered": True})
 
     except Exception as e:
         tb = traceback.format_exc()
