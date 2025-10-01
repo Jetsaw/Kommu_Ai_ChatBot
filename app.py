@@ -197,6 +197,35 @@ async def admin_unfreeze(request: Request):
         return PlainTextResponse("Forbidden", 403)
     freeze(user_id, False, mode="user")
     return PlainTextResponse("Unfrozen")
+
+# ----------------- Cloud API Send -----------------
+def send_whatsapp_message(to: str, text: str):
+    # Ensure number is in E.164 format (+6011...)
+    if not str(to).startswith("+"):
+        to = f"+{to.lstrip('+')}"
+
+    url = f"https://graph.facebook.com/v17.0/{WHATSAPP_PHONE_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "text",
+        "text": {"body": text}
+    }
+
+    try:
+        log.info(f"[Kai] Sending → {json.dumps(payload)}")
+        r = requests.post(url, headers=headers, json=payload, timeout=10)
+        log.info(f"[Kai] Meta Response {r.status_code}: {r.text}")
+        if r.status_code >= 400:
+            log.error(f"[Kai] Send fail {r.status_code}: {r.text}")
+    except Exception as e:
+        log.error(f"[Kai] Send error: {e}")
+
+
 # ----------------- Webhook POST -----------------
 @app.post("/webhook")
 async def webhook(request: Request):
