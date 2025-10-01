@@ -32,7 +32,7 @@ log = logging.getLogger("kai")
 
 DEBUG_QA = os.getenv("DEBUG_QA", "1") == "1"
 
-# ----------------- Meta Cloud API Vars -----------------
+# Meta API (Cloud API)
 VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "Kommu_Bot")
 WHATSAPP_TOKEN = os.getenv("META_PERMANENT_TOKEN", "")
 WHATSAPP_PHONE_ID = os.getenv("META_PHONE_NUMBER_ID", "")
@@ -84,6 +84,7 @@ def send_whatsapp_message(to: str, text: str):
             log.error(f"[Kai] Send fail {r.status_code}: {r.text}")
     except Exception as e:
         log.error(f"[Kai] Send error: {e}")
+
 # ----------------- RAG + LLM -----------------
 def run_rag(user_text: str, lang_hint: str = "EN", intent_hint: str | None = None) -> str:
     if not rag:
@@ -109,7 +110,6 @@ def maybe_add_la_hint(user_id, msg, lang):
         hint = " Jika perlu ejen manusia, taip LA." if lang=="BM" else " If you need a live agent, type LA."
         msg += "\n" + hint
     return msg
-
 # ----------------- RAG load on startup -----------------
 def load_rag():
     global rag
@@ -138,10 +138,9 @@ try:
 except Exception as e:
     print("[Startup] Error:", e)
 
-# ----------------- Startup Events -----------------
 @app.on_event("startup")
 def startup_event():
-    init_db()  # make sure sessions.db is created with "sessions" table
+    init_db()
     log.info("[Kai] sessions.db initialized")
 
 @repeat_every(seconds=86400)
@@ -168,7 +167,7 @@ def auto_refresh():
 async def health():
     return "Kai alive"
 
-# Webhook verification (GET)
+# Webhook verification (GET) for Meta Cloud API
 @app.get("/webhook")
 async def verify_webhook(
     hub_mode: str = Query(None, alias="hub.mode"),
@@ -176,10 +175,12 @@ async def verify_webhook(
     hub_verify_token: str = Query(None, alias="hub.verify_token"),
 ):
     if hub_mode == "subscribe" and hub_verify_token == VERIFY_TOKEN:
+        log.info("[Kai] Webhook verified successfully")
         return PlainTextResponse(hub_challenge)
+    log.warning(f"[Kai] Webhook verification failed: {hub_verify_token}")
     return PlainTextResponse("Forbidden", status_code=403)
 
-# ----------------- Admin freeze/unfreeze -----------------
+# ----------------- Admin Endpoints for CS -----------------
 @app.api_route("/admin/freeze", methods=["POST", "GET"])
 async def admin_freeze(request: Request):
     token = (request.query_params.get("token") or (await request.form()).get("token") or "")
@@ -187,6 +188,7 @@ async def admin_freeze(request: Request):
     if token != ADMIN_TOKEN: 
         return PlainTextResponse("Forbidden", 403)
     freeze(user_id, True, mode="admin")
+    log.info(f"[ADMIN] Freeze user {user_id}")
     return PlainTextResponse("Frozen")
 
 @app.api_route("/admin/unfreeze", methods=["POST", "GET"])
@@ -196,36 +198,8 @@ async def admin_unfreeze(request: Request):
     if token != ADMIN_TOKEN: 
         return PlainTextResponse("Forbidden", 403)
     freeze(user_id, False, mode="user")
+    log.info(f"[ADMIN] Unfrozen {user_id}")
     return PlainTextResponse("Unfrozen")
-
-# ----------------- Cloud API Send -----------------
-def send_whatsapp_message(to: str, text: str):
-    # Ensure number is in E.164 format (+6011...)
-    if not str(to).startswith("+"):
-        to = f"+{to.lstrip('+')}"
-
-    url = f"https://graph.facebook.com/v17.0/{WHATSAPP_PHONE_ID}/messages"
-    headers = {
-        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "type": "text",
-        "text": {"body": text}
-    }
-
-    try:
-        log.info(f"[Kai] Sending → {json.dumps(payload)}")
-        r = requests.post(url, headers=headers, json=payload, timeout=10)
-        log.info(f"[Kai] Meta Response {r.status_code}: {r.text}")
-        if r.status_code >= 400:
-            log.error(f"[Kai] Send fail {r.status_code}: {r.text}")
-    except Exception as e:
-        log.error(f"[Kai] Send error: {e}")
-
-
 # ----------------- Webhook POST -----------------
 @app.post("/webhook")
 async def webhook(request: Request):
@@ -233,9 +207,15 @@ async def webhook(request: Request):
         data = await request.json()
         log.info(f"[Kai] IN: {json.dumps(data)}")
 
-        entry = data.get("entry", [])[0]
-        changes = entry.get("changes", [])[0]
-        value = changes.get("value", {})
+        entry = data.get("entry", [])
+        if not entry:
+            return JSONResponse({"status": "no_entry"})
+
+        changes = entry[0].get("changes", [])
+        if not changes:
+            return JSONResponse({"status": "no_changes"})
+
+        value = changes[0].get("value", {})
         messages = value.get("messages", [])
 
         if not messages:
@@ -245,80 +225,86 @@ async def webhook(request: Request):
         wa_from = msg.get("from")
         msg_type = msg.get("type")
         body = ""
+
+        # -------- Unsupported message types --------
         if msg_type == "text":
             body = msg["text"]["body"].strip()
         else:
-            # Unsupported media → freeze + escalate
             freeze(wa_from, True, mode="user")
             send_whatsapp_message(
                 wa_from,
-                "Unsupported media (image/audio/video/document). A live agent will contact you."
+                add_footer(
+                    "We received a media message that is not supported. "
+                    "A live agent will contact you." if not is_malay(body) else
+                    "Kami terima mesej media yang tidak disokong. "
+                    "Seorang ejen manusia akan hubungi anda.",
+                    "BM" if is_malay(body) else "EN"
+                )
             )
             return JSONResponse({"status": "unsupported"})
 
-        # Normalize text & session
+        if not body:
+            return JSONResponse({"status": "empty"})
+
+        # -------- Session + Language --------
         lower = norm(body)
         sess = get_session(wa_from)
         lang = sess["lang"] or ("BM" if is_malay(body) else "EN")
         set_lang(wa_from, lang)
         aft = not is_office_hours()
 
-        # -------- Frozen Handling --------
+        # -------- Resume --------
         if sess["frozen"]:
-            if lower in {"resume","unfreeze","sambung"}:
+            if lower in {"resume", "unfreeze", "sambung"}:
                 freeze(wa_from, False, mode="user")
-                msg_out = "Bot resumed. How can I help?" if lang=="EN" else \
+                msg_out = "Bot resumed. How can I help?" if lang == "EN" else \
                           "Bot disambung semula. Ada apa yang boleh saya bantu?"
                 send_whatsapp_message(wa_from, add_footer(msg_out, lang))
                 return JSONResponse({"status": "resumed"})
-            send_whatsapp_message(
-                wa_from,
-                add_footer(
-                    "A live agent will assist you soon." if lang=="EN" else
-                    "Seorang ejen manusia akan membantu anda tidak lama lagi.",
-                    lang
-                )
+
+            msg_out = (
+                "A live agent will assist you soon.\n\n👉 Type *resume* if you want to continue with the bot."
+                if lang == "EN"
+                else "Seorang ejen manusia akan menghubungi anda.\n\n👉 Taip *resume* untuk terus berbual dengan bot."
             )
+            send_whatsapp_message(wa_from, add_footer(msg_out, lang))
             return JSONResponse({"status": "frozen"})
 
         # -------- Live Agent Request --------
-        if has_any(["la","human","agent","request human"], lower):
+        if has_any(["la", "human", "request human"], lower):
             freeze(wa_from, True, mode="user")
-            send_whatsapp_message(
-                wa_from,
-                add_footer(
-                    "A live agent will reach you during office hours." if lang=="EN" else
-                    "Seorang ejen manusia akan hubungi anda pada waktu pejabat.",
-                    lang
-                )
+            msg_out = (
+                "A live agent will reach out during office hours. Chat is now frozen."
+                if lang == "EN"
+                else "Seorang ejen manusia akan hubungi anda pada waktu pejabat. Chat dibekukan."
             )
+            send_whatsapp_message(wa_from, add_footer(msg_out, lang))
             return JSONResponse({"status": "agent"})
 
-        # -------- Greeting --------
-        if not sess["greeted"] and has_any(
-            ["hi","hello","hai","helo","mula","start","menu"], lower
-        ) and len(lower.split()) <= 3:
+        # -------- Greeting (short only) --------
+        if not sess["greeted"] and has_any(["hi", "hello", "hai", "helo", "mula", "start", "menu"], lower) and len(lower.split()) <= 3:
             msg_out = (
-                "Hai! Saya Kai - Chatbot Kommu\n[Perbualan ini dikendalikan oleh chatbot beta, "
-                "diselia oleh manusia semasa waktu pejabat.]"
-                if lang=="BM" else
-                "Hi! I'm Kai - Kommu Chatbot\n[This conversation is handled by a chatbot (beta), "
-                "supervised by a human during office hours.]"
+                "Hi! I'm Kai - Kommu Chatbot\nThis conversation is handled by a chatbot (beta)."
+                if lang == "EN"
+                else "Hai! Saya Kai - Chatbot Kommu\nPerbualan ini dikendalikan oleh chatbot beta."
             )
-            if aft: msg_out += after_hours_suffix(lang)
+            if aft:
+                msg_out += after_hours_suffix(lang)
             sess["greeted"] = True
             send_whatsapp_message(wa_from, add_footer(msg_out, lang))
             return JSONResponse({"status": "greeted"})
 
-        # -------- Warranty Lookup --------
-        if 6 <= len(lower) <= 20:  # likely serial/dongle
+        # -------- Warranty Direct Lookup --------
+        if 6 <= len(lower) <= 20:
             row = warranty_lookup_by_dongle(body)
             if row:
                 msg_out = (
-                    f"Status waranti: {warranty_text_from_row(row)}" if lang=="BM" else
                     f"Warranty status: {warranty_text_from_row(row)}"
+                    if lang == "EN"
+                    else f"Status waranti: {warranty_text_from_row(row)}"
                 )
-                if aft: msg_out += after_hours_suffix(lang)
+                if aft:
+                    msg_out += after_hours_suffix(lang)
                 msg_out = maybe_add_la_hint(wa_from, msg_out, lang)
                 send_whatsapp_message(wa_from, add_footer(msg_out, lang))
                 return JSONResponse({"status": "warranty"})
@@ -326,23 +312,23 @@ async def webhook(request: Request):
         # -------- RAG Default --------
         answer = run_rag(body, lang_hint=lang)
         if answer:
-            if aft: answer += after_hours_suffix(lang)
+            if aft:
+                answer += after_hours_suffix(lang)
             answer = maybe_add_la_hint(wa_from, answer, lang)
             send_whatsapp_message(wa_from, add_footer(answer, lang))
             return JSONResponse({"status": "answered"})
 
         # -------- Hard Fallback --------
         msg_out = (
-            "Saya boleh bantu harga, pemasangan, waktu pejabat, waranti, dan pandu uji. "
-            "Contoh: 'Beli Kommu', 'Apa itu Kommu', 'Bagaimana ia berfungsi'."
-            if lang=="BM"
-            else "I can help with price, installation, office hours, warranty, and test drives. "
-                 "Try: 'Buy Kommu', 'What is Kommu', 'How does it work'."
+            "I can help with price, installation, office hours, warranty, and test drives."
+            if lang == "EN"
+            else "Saya boleh bantu harga, pemasangan, waktu pejabat, waranti, dan pandu uji."
         )
-        if aft: msg_out += after_hours_suffix(lang)
+        if aft:
+            msg_out += after_hours_suffix(lang)
         msg_out = maybe_add_la_hint(wa_from, msg_out, lang)
         send_whatsapp_message(wa_from, add_footer(msg_out, lang))
-        return JSONResponse({"status": "fallback", "unanswered": True})
+        return JSONResponse({"status": "fallback"})
 
     except Exception as e:
         tb = traceback.format_exc()
