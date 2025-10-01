@@ -1,14 +1,12 @@
-from fastapi import FastAPI, Request
-from fastapi.responses import PlainTextResponse, Response
+from fastapi import FastAPI, Request, Query
+from fastapi.responses import PlainTextResponse, JSONResponse
 from datetime import datetime
-import pytz, re, os, json, traceback
-from xml.sax.saxutils import escape
+import pytz, re, os, json, traceback, logging
 from logging.handlers import RotatingFileHandler
-import logging
+import requests
 
 from config import (
     TZ_REGION, OFFICE_START, OFFICE_END, PORT,
-    TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_WHATSAPP_NUMBER,
     CS_RECIPIENTS, AGENT_NUMBERS,
     SOP_DOC_URL, WARRANTY_CSV_URL,
     RAG_DIR, SOP_JSON_PATH, ADMIN_TOKEN
@@ -25,7 +23,6 @@ from google_sheets import (
 from session_state import get_session, set_lang, freeze, update_reply_state, log_qna
 from web_scraper import scrape as scrape_site
 from fastapi_utils.tasks import repeat_every
-from twilio.rest import Client as TwilioClient
 
 # ----------------- Logging -----------------
 os.makedirs("logs", exist_ok=True)
@@ -34,6 +31,11 @@ logging.basicConfig(level=logging.INFO, handlers=[handler])
 log = logging.getLogger("kai")
 
 DEBUG_QA = os.getenv("DEBUG_QA", "1") == "1"
+VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "Kommu_Bot")
+
+WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
+WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID", "")
+
 app = FastAPI(title="Kai - Kommu Chatbot")
 
 FOOTER_EN = "\n\nNote: I am a chatbot, please send your questions one by one. If you need a live agent, type LA."
@@ -58,48 +60,29 @@ def norm(text: str) -> str:
 def has_any(words, text: str) -> bool:
     return any(re.search(rf"\b{w}\b", text) for w in words)
 
-def twiml(message: str) -> Response:
-    body = escape(message or "", {'"': "&quot;", "'": "&apos;"})
-    xml = f'<?xml version="1.0" encoding="UTF-8"?><Response><Message>{body}</Message></Response>'
-    return Response(content=xml, media_type="text/xml; charset=utf-8")
-
-def _log_and_twiml(wa_from, asked, answer, lang, intent, after_hours, frozen, status="ok"):
+def add_footer(answer: str, lang: str) -> str:
     footer = FOOTER_BM if lang == "BM" else FOOTER_EN
-    answer = (answer or "").rstrip() + footer
+    return (answer or "").rstrip() + footer
+
+# ----------------- Cloud API Send -----------------
+def send_whatsapp_message(to: str, text: str):
+    url = f"https://graph.facebook.com/v17.0/{WHATSAPP_PHONE_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "text",
+        "text": {"body": text}
+    }
     try:
-        log_qna(wa_from, asked, answer, lang, intent, after_hours, frozen, status)
-    finally:
-        return twiml(answer)
-
-# ----------------- Escalation Hint -----------------
-def maybe_add_la_hint(user_id, msg, lang):
-    update_reply_state(user_id)
-    sess = get_session(user_id)
-    if sess["reply_count"] >= 2:
-        hint = " Jika perlu ejen manusia, taip LA." if lang=="BM" else " If you need a live agent, type LA."
-        msg += "\n" + hint
-    return msg
-
-# ----------------- CS forwarding -----------------
-def summarize_for_agent(user_text: str, lang: str):
-    sys = "You summarize customer WhatsApp issues for internal CS. Output 2-4 lines, no emojis."
-    prompt = f"Customer message ({'Malay' if lang=='BM' else 'English'}):\n{user_text}\n\nSummarize the request."
-    s = chat_completion(sys, prompt)
-    return (s or user_text).strip()
-
-def forward_to_cs(wa_from: str, summary_text: str):
-    if not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_WHATSAPP_NUMBER and CS_RECIPIENTS):
-        print("[CS-FWD] Missing Twilio env or CS_RECIPIENTS; skipping forward.")
-        return
-    client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-    ts = now_myt_str()
-    msg = f"[Kai] Live-agent request\nTime: {ts}\nFrom: {wa_from}\nSummary:\n{summary_text}"
-    for to in CS_RECIPIENTS:
-        try:
-            client.messages.create(from_=TWILIO_WHATSAPP_NUMBER, to=to, body=msg)
-        except Exception as e:
-            print(f"[CS-FWD] send fail to {to}: {e}")
-
+        r = requests.post(url, headers=headers, json=payload, timeout=10)
+        if r.status_code >= 400:
+            log.error(f"[Kai] Send fail {r.status_code}: {r.text}")
+    except Exception as e:
+        log.error(f"[Kai] Send error: {e}")
 # ----------------- RAG + LLM -----------------
 def run_rag(user_text: str, lang_hint: str = "EN", intent_hint: str | None = None) -> str:
     if not rag:
@@ -117,6 +100,14 @@ def run_rag(user_text: str, lang_hint: str = "EN", intent_hint: str | None = Non
         log.info(f"[Kai] ERR chat_completion: {e}")
         llm = ""
     return llm.strip() if llm else ""
+
+def maybe_add_la_hint(user_id, msg, lang):
+    update_reply_state(user_id)
+    sess = get_session(user_id)
+    if sess["reply_count"] >= 2:
+        hint = " Jika perlu ejen manusia, taip LA." if lang=="BM" else " If you need a live agent, type LA."
+        msg += "\n" + hint
+    return msg
 
 # ----------------- RAG load on startup -----------------
 def load_rag():
@@ -171,87 +162,58 @@ def auto_refresh():
 async def health():
     return "Kai alive"
 
-@app.api_route("/status_callback", methods=["GET","POST"])
-async def status_callback(_: Request):
-    return PlainTextResponse("OK")
+# Webhook verification (GET)
+@app.get("/webhook")
+async def verify_webhook(
+    hub_mode: str = Query(None, alias="hub.mode"),
+    hub_challenge: str = Query(None, alias="hub.challenge"),
+    hub_verify_token: str = Query(None, alias="hub.verify_token"),
+):
+    if hub_mode == "subscribe" and hub_verify_token == VERIFY_TOKEN:
+        return PlainTextResponse(hub_challenge)
+    return PlainTextResponse("Forbidden", status_code=403)
 
-@app.api_route("/admin/refresh_sheets", methods=["GET","POST"])
-async def refresh_sheets(request: Request):
-    token = (request.query_params.get("token") or (await request.form()).get("token") or "")
-    if token != ADMIN_TOKEN:
-        return PlainTextResponse("Forbidden", status_code=403)
-    try:
-        if SOP_DOC_URL:
-            txt = fetch_sop_doc_text()
-            qas = parse_qas_from_text(txt)
-            if qas:
-                with open(SOP_JSON_PATH, "w", encoding="utf-8") as f:
-                    json.dump(qas, f, ensure_ascii=False, indent=2)
-                rebuild_rag()
-                load_rag()
-        fetch_warranty_all()
-        return PlainTextResponse("OK")
-    except Exception as e:
-        return PlainTextResponse(f"ERR: {e}", status_code=500)
-
-# ----------------- Admin Endpoints for CS -----------------
+# Admin freeze/unfreeze
 @app.api_route("/admin/freeze", methods=["POST", "GET"])
 async def admin_freeze(request: Request):
     token = (request.query_params.get("token") or (await request.form()).get("token") or "")
     user_id = request.query_params.get("user_id") or (await request.form()).get("user_id")
-    mode = request.query_params.get("mode") or (await request.form()).get("mode") or "user"
-
-    if token != ADMIN_TOKEN:
-        return PlainTextResponse("Forbidden", status_code=403)
-    if not user_id:
-        return PlainTextResponse("Missing user_id", status_code=400)
-
-    freeze(user_id, True, mode=mode, taken_by="ADMIN")
-    log.info(f"[ADMIN] Freeze user {user_id} with mode={mode}")
+    if token != ADMIN_TOKEN: return PlainTextResponse("Forbidden", 403)
+    freeze(user_id, True, mode="admin")
     return PlainTextResponse("Frozen")
 
 @app.api_route("/admin/unfreeze", methods=["POST", "GET"])
 async def admin_unfreeze(request: Request):
     token = (request.query_params.get("token") or (await request.form()).get("token") or "")
     user_id = request.query_params.get("user_id") or (await request.form()).get("user_id")
-    takeover = request.query_params.get("takeover") or (await request.form()).get("takeover") or "bot"
-
-    if token != ADMIN_TOKEN:
-        return PlainTextResponse("Forbidden", status_code=403)
-    if not user_id:
-        return PlainTextResponse("Missing user_id", status_code=400)
-
-    if takeover == "manual":
-        freeze(user_id, False, mode="manual")
-        log.info(f"[ADMIN] Unfrozen {user_id} (manual takeover)")
-    else:
-        freeze(user_id, False, mode="user")
-        log.info(f"[ADMIN] Unfrozen {user_id} (chatbot takeover)")
-
-    return PlainTextResponse(f"Unfrozen ({takeover})")
-
-# ----------------- Webhook -----------------
+    if token != ADMIN_TOKEN: return PlainTextResponse("Forbidden", 403)
+    freeze(user_id, False, mode="user")
+    return PlainTextResponse("Unfrozen")
+# ----------------- Webhook POST -----------------
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
-        form = await request.form()
-        body = (form.get("Body") or "").strip()
-        wa_from = form.get("From") or ""
-        log.info(f"[Kai] IN From={wa_from!r} Body={body!r}")
+        data = await request.json()
+        log.info(f"[Kai] IN: {json.dumps(data)}")
 
-        # Unsupported message types
-        msg_type = form.get("MessageType") or ""
-        media_url = form.get("MediaUrl0") or ""
-        if msg_type in {"voice","audio","image","video","document"} or media_url:
+        entry = data.get("entry", [])[0]
+        changes = entry.get("changes", [])[0]
+        value = changes.get("value", {})
+        messages = value.get("messages", [])
+
+        if not messages:
+            return JSONResponse({"status": "no_messages"})
+
+        msg = messages[0]
+        wa_from = msg.get("from")
+        msg_type = msg.get("type")
+        body = ""
+        if msg_type == "text":
+            body = msg["text"]["body"].strip()
+        else:
             freeze(wa_from, True, mode="user")
-            forward_to_cs(wa_from, f"Unsupported: {msg_type or 'media'}")
-            msg = "Kami terima mesej media yang tidak disokong. Ejen akan hubungi anda." if is_malay(body) else \
-                  "We received a media message that is not supported. A live agent will contact you."
-            return _log_and_twiml(wa_from, body, msg, "BM" if is_malay(body) else "EN",
-                                  "unsupported_media", not is_office_hours(), True)
-
-        if not body:
-            return _log_and_twiml(wa_from, body, "", "EN", "empty", False, False)
+            send_whatsapp_message(wa_from, "Unsupported media. A live agent will contact you.")
+            return JSONResponse({"status": "unsupported"})
 
         lower = norm(body)
         sess = get_session(wa_from)
@@ -259,67 +221,49 @@ async def webhook(request: Request):
         set_lang(wa_from, lang)
         aft = not is_office_hours()
 
-        # Frozen Handling
+        # Resume
         if sess["frozen"]:
-            if sess["frozen_mode"] == "user" and lower in {"resume","unfreeze","sambung"}:
+            if lower in {"resume","unfreeze","sambung"}:
                 freeze(wa_from, False, mode="user")
-                msg = "Bot resumed. How can I help?" if lang != "BM" else \
-                      "Bot disambung semula. Ada apa yang boleh saya bantu?"
-                return _log_and_twiml(wa_from, body, msg, lang, "resume", aft, False)
+                msg_out = "Bot resumed. How can I help?" if lang=="EN" else "Bot disambung semula. Ada apa yang boleh saya bantu?"
+                send_whatsapp_message(wa_from, add_footer(msg_out, lang))
+                return JSONResponse({"status": "resumed"})
+            send_whatsapp_message(wa_from, add_footer("A live agent will assist you soon.", lang))
+            return JSONResponse({"status": "frozen"})
 
-            msg = ("Seorang ejen manusia akan menghubungi anda.\n\n👉 Taip *resume* untuk terus berbual dengan bot."
-                   if lang=="BM" else
-                   "A live agent will get back to you.\n\n👉 Type *resume* if you want to continue with the bot.")
-            return _log_and_twiml(wa_from, body, msg, lang, "frozen_ack", aft, True)
-
-        # Live Agent request
-        if has_any(["la","human","request human"], lower):
+        # Request agent
+        if has_any(["la","human"], lower):
             freeze(wa_from, True, mode="user")
-            sm = summarize_for_agent(body, lang)
-            forward_to_cs(wa_from, sm)
-            msg = "Seorang ejen manusia akan hubungi anda." if lang=="BM" else "A live agent will reach you."
-            return _log_and_twiml(wa_from, body, msg, lang, "live_agent", aft, True)
+            send_whatsapp_message(wa_from, add_footer("A live agent will reach you.", lang))
+            return JSONResponse({"status": "agent"})
 
-        # Greeting (only short)
-        if not sess["greeted"] and has_any(["hi","hello","hai","helo","mula","start","menu"], lower) and len(lower.split()) <= 3:
-            msg = ("Hai! Saya Kai - Chatbot Kommu\nPerbualan ini dikendalikan oleh chatbot beta."
-                   if lang=="BM" else
-                   "Hi! I'm Kai - Kommu Chatbot\nThis conversation is handled by a chatbot (beta).")
-            if aft: msg += after_hours_suffix(lang)
+        # Greeting
+        if not sess["greeted"] and has_any(["hi","hello","hai","helo","mula","start","menu"], lower):
+            msg_out = "Hai! Saya Kai - Chatbot Kommu" if lang=="BM" else "Hi! I'm Kai - Kommu Chatbot"
             sess["greeted"] = True
-            return _log_and_twiml(wa_from, body, msg, lang, "greeting", aft, False)
+            send_whatsapp_message(wa_from, add_footer(msg_out, lang))
+            return JSONResponse({"status": "greeted"})
 
-        # Warranty lookup
+        # Warranty check
         if 6 <= len(lower) <= 20:
             row = warranty_lookup_by_dongle(body)
             if row:
-                msg = f"Status waranti: {warranty_text_from_row(row)}" if lang=="BM" else \
-                      f"Warranty status: {warranty_text_from_row(row)}"
-                if aft: msg += after_hours_suffix(lang)
-                msg = maybe_add_la_hint(wa_from, msg, lang)
-                return _log_and_twiml(wa_from, body, msg, lang, "warranty", aft, False)
+                msg_out = f"Status waranti: {warranty_text_from_row(row)}" if lang=="BM" else f"Warranty status: {warranty_text_from_row(row)}"
+                send_whatsapp_message(wa_from, add_footer(msg_out, lang))
+                return JSONResponse({"status": "warranty"})
 
-        # RAG default
+        # RAG
         answer = run_rag(body, lang_hint=lang)
         if answer:
-            if aft: answer += after_hours_suffix(lang)
-            answer = maybe_add_la_hint(wa_from, answer, lang)
-            return _log_and_twiml(wa_from, body, answer, lang, "default", aft, False)
+            send_whatsapp_message(wa_from, add_footer(answer, lang))
+            return JSONResponse({"status": "answered"})
 
-        # Hard fallback
-        msg = ("Saya boleh bantu harga, pemasangan, waktu pejabat, waranti, dan pandu uji."
-               if lang=="BM" else
-               "I can help with price, installation, office hours, warranty, and test drives.")
-        if aft: msg += after_hours_suffix(lang)
-        msg = maybe_add_la_hint(wa_from, msg, lang)
-        return _log_and_twiml(wa_from, body, msg, lang, "fallback", aft, False, status="unanswered")
+        # Fallback
+        msg_out = "Saya boleh bantu harga, pemasangan, waktu pejabat, waranti, dan pandu uji." if lang=="BM" else "I can help with price, installation, office hours, warranty, and test drives."
+        send_whatsapp_message(wa_from, add_footer(msg_out, lang))
+        return JSONResponse({"status": "fallback"})
 
     except Exception as e:
         tb = traceback.format_exc()
-        log.error(f"[Kai] FATAL in webhook: {e}\n{tb}")
-        return _log_and_twiml(
-            wa_from if 'wa_from' in locals() else "",
-            body if 'body' in locals() else "",
-            "Sorry, internal error. Please try again or type LA.",
-            "EN", "error", False, False, status="error"
-        )
+        log.error(f"[Kai] ERR webhook: {e}\n{tb}")
+        return JSONResponse({"status": "error", "error": str(e)})
