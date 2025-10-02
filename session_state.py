@@ -16,7 +16,8 @@ def init_db():
         frozen_mode TEXT,
         reply_count INTEGER DEFAULT 0,
         greeted INTEGER DEFAULT 0,
-        last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        last_intent TEXT
     )
     """)
     cur.execute("""
@@ -44,31 +45,28 @@ def get_session(user_id: str):
     cur.execute("SELECT * FROM sessions WHERE user_id=?", (user_id,))
     row = cur.fetchone()
 
-    # Check expiry (1 hour)
+    # Expire after 1 hour of inactivity
     if row:
         try:
             last_seen = datetime.datetime.strptime(row["last_seen"], "%Y-%m-%d %H:%M:%S")
-            if (datetime.datetime.now() - last_seen).total_seconds() > 3600:  # 1 hour
+            if (datetime.datetime.now() - last_seen).total_seconds() > 3600:
                 cur.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
                 conn.commit()
                 row = None
         except Exception:
-            # if parsing error, reset session
             cur.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
             conn.commit()
             row = None
 
-    # Create new session if missing or expired
     if not row:
         cur.execute("""
-        INSERT INTO sessions (user_id, lang, frozen, frozen_mode, reply_count, greeted, last_seen)
-        VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP)
+        INSERT INTO sessions (user_id, lang, frozen, frozen_mode, reply_count, greeted, last_seen, last_intent)
+        VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP,NULL)
         """, (user_id, None, 0, None, 0, 0))
         conn.commit()
         cur.execute("SELECT * FROM sessions WHERE user_id=?", (user_id,))
         row = cur.fetchone()
 
-    # Always update last_seen
     cur.execute("UPDATE sessions SET last_seen=CURRENT_TIMESTAMP WHERE user_id=?", (user_id,))
     conn.commit()
     conn.close()
@@ -96,6 +94,21 @@ def update_reply_state(user_id: str):
     conn.commit()
     conn.close()
 
+def set_last_intent(user_id: str, intent: str | None):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("UPDATE sessions SET last_intent=?, last_seen=CURRENT_TIMESTAMP WHERE user_id=?", (intent, user_id))
+    conn.commit()
+    conn.close()
+
+def get_last_intent(user_id: str) -> str | None:
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT last_intent FROM sessions WHERE user_id=?", (user_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row[0] if row and row[0] else None
+
 def log_qna(user_id: str, question: str, answer: str, lang: str, intent: str, after_hours: bool, frozen: bool, status: str):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -106,5 +119,5 @@ def log_qna(user_id: str, question: str, answer: str, lang: str, intent: str, af
     conn.commit()
     conn.close()
 
-# Initialize DB automatically
+# Initialize DB
 init_db()

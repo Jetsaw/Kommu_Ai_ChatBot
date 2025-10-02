@@ -21,7 +21,10 @@ from sop_doc_loader import fetch_sop_doc_text, parse_qas_from_text
 from google_sheets import (
     fetch_warranty_all, warranty_lookup_by_dongle, warranty_text_from_row
 )
-from session_state import get_session, set_lang, freeze, update_reply_state, log_qna, init_db
+from session_state import (
+    get_session, set_lang, freeze, update_reply_state, log_qna, init_db,
+    set_last_intent, get_last_intent
+)
 from web_scraper import scrape as scrape_site
 from fastapi_utils.tasks import repeat_every
 
@@ -87,15 +90,12 @@ def filter_hallucinated_links(answer: str, context: str) -> str:
 def enforce_link_intents(user_text: str, answer: str) -> str:
     """Force specific links for common intents"""
     lower = user_text.lower()
-    # Test drive → Calendly
     if "test drive" in lower or "pandu uji" in lower:
         if "https://calendly.com/kommuassist/test-drive" not in answer:
             answer += "\n\n👉 You can book a test drive here: https://calendly.com/kommuassist/test-drive"
-    # Price / buy → Store
     if "price" in lower or "harga" in lower or "buy" in lower or "beli" in lower:
         if "https://kommu.ai/store/" not in answer:
             answer += "\n\n👉 You can view pricing at our store: https://kommu.ai/store/"
-    # Community → Discord/Facebook
     if "community" in lower or "komuniti" in lower or "discord" in lower or "facebook" in lower:
         if "https://discord.gg/" not in answer and "https://facebook.com/groups/" not in answer:
             answer += "\n\n👉 Join our community here: https://discord.gg/ / https://facebook.com/groups/"
@@ -143,7 +143,6 @@ def run_rag_dual(user_text: str, lang_hint: str = "EN") -> str:
     )
     lang_instruction = "Jawab dalam BM dengan nada mesra." if lang_hint == "BM" else "Answer politely in English."
 
-    # Step 1: SOP RAG
     context = rag_sop.build_context(user_text, topk=4) if rag_sop else ""
     if context.strip():
         prompt = f"User: {user_text}\n\nContext:\n{context}\n\n{lang_instruction}"
@@ -153,7 +152,6 @@ def run_rag_dual(user_text: str, lang_hint: str = "EN") -> str:
         if llm:
             return llm
 
-    # Step 2: Website RAG
     context = rag_web.build_context(user_text, topk=4) if rag_web else ""
     if context.strip():
         prompt = f"User: {user_text}\n\nContext:\n{context}\n\n{lang_instruction}"
@@ -250,26 +248,6 @@ async def verify_webhook(
     return PlainTextResponse("Forbidden", status_code=403)
 
 # ----------------- Admin Endpoints -----------------
-@app.api_route("/admin/freeze", methods=["POST", "GET"])
-async def admin_freeze(request: Request):
-    token = (request.query_params.get("token") or (await request.form()).get("token") or "")
-    user_id = request.query_params.get("user_id") or (await request.form()).get("user_id")
-    if token != ADMIN_TOKEN: 
-        return PlainTextResponse("Forbidden", 403)
-    freeze(user_id, True, mode="admin")
-    log.info(f"[ADMIN] Freeze user {user_id}")
-    return PlainTextResponse("Frozen")
-
-@app.api_route("/admin/unfreeze", methods=["POST", "GET"])
-async def admin_unfreeze(request: Request):
-    token = (request.query_params.get("token") or (await request.form()).get("token") or "")
-    user_id = request.query_params.get("user_id") or (await request.form()).get("user_id")
-    if token != ADMIN_TOKEN: 
-        return PlainTextResponse("Forbidden", 403)
-    freeze(user_id, False, mode="user")
-    log.info(f"[ADMIN] Unfrozen {user_id}")
-    return PlainTextResponse("Unfrozen")
-
 @app.api_route("/admin/reset", methods=["POST", "GET"])
 async def admin_reset(request: Request):
     token = (request.query_params.get("token") or (await request.form()).get("token") or "")
@@ -313,16 +291,9 @@ async def webhook(request: Request):
             body = msg["text"]["body"].strip()
         else:
             freeze(wa_from, True, mode="user")
-            send_whatsapp_message(
-                wa_from,
-                add_footer(
-                    "We received a media message that I cannot process at the moment. "
-                    "A live agent will reach out to assist you." if not is_malay(body) else
-                    "Kami menerima mesej media yang tidak dapat diproses buat masa ini. "
-                    "Seorang ejen manusia akan menghubungi anda.",
-                    "BM" if is_malay(body) else "EN"
-                )
-            )
+            send_whatsapp_message(wa_from,
+                add_footer("I received a media message that I cannot process. A live agent will assist you.",
+                           "EN"))
             return JSONResponse({"status": "unsupported"})
 
         if not body:
@@ -335,54 +306,35 @@ async def webhook(request: Request):
         set_lang(wa_from, lang)
         aft = not is_office_hours()
 
-        # -------- Resume --------
-        if sess["frozen"]:
-            if lower in {"resume", "unfreeze", "sambung"}:
-                freeze(wa_from, False, mode="user")
-                msg_out = "Bot resumed. How can I assist you?" if lang == "EN" else \
-                          "Bot disambung semula. Apa yang boleh saya bantu?"
-                send_whatsapp_message(wa_from, add_footer(msg_out, lang))
-                return JSONResponse({"status": "resumed"})
+        # -------- Continuity: Beta Tester --------
+        last_intent = get_last_intent(wa_from)
+        if last_intent == "beta_tester" and has_any(["yes", "ya", "ok", "baik", "saya mahu", "nak join"], lower):
             msg_out = (
-                "A live agent will assist you soon. Type *resume* if you’d like me to continue."
-                if lang == "EN"
-                else "Seorang ejen manusia akan membantu anda tidak lama lagi. Taip *resume* untuk sambung berbual dengan saya."
+                "Great! You can sign up for our beta tester program here:\nhttps://kommu.ai/beta-tester"
+                if lang == "EN" else
+                "Bagus! Anda boleh daftar untuk program beta tester di sini:\nhttps://kommu.ai/beta-tester"
             )
+            set_last_intent(wa_from, None)
             send_whatsapp_message(wa_from, add_footer(msg_out, lang))
-            return JSONResponse({"status": "frozen"})
-
-        # -------- Live Agent Request --------
-        if has_any(["la", "human", "request human"], lower):
-            freeze(wa_from, True, mode="user")
+            return JSONResponse({"status": "beta_tester_confirmed"})
+        if "beta" in lower and "test" in lower:
             msg_out = (
-                "Sure, I’ll connect you with a live agent during office hours. This chat is now paused."
-                if lang == "EN"
-                else "Baik, saya akan hubungkan anda dengan ejen manusia pada waktu pejabat. Chat kini dijeda."
+                "To become a beta tester, you’ll need to sign up on our program page. Would you like the link?"
+                if lang == "EN" else
+                "Untuk menjadi beta tester, anda perlu daftar di laman program kami. Mahu saya kongsikan pautan?"
             )
+            set_last_intent(wa_from, "beta_tester")
             send_whatsapp_message(wa_from, add_footer(msg_out, lang))
-            return JSONResponse({"status": "agent"})
+            return JSONResponse({"status": "beta_tester"})
 
-        # -------- Greeting --------
-        if not sess["greeted"] and has_any(["hi", "hello", "hai", "helo", "mula", "start", "menu"], lower) and len(lower.split()) <= 3:
-            msg_out = (
-                "Hello! I’m Kai, Kommu’s support chatbot.\nThis chat is supervised by humans during office hours."
-                if lang == "EN"
-                else "Hai! Saya Kai, chatbot sokongan Kommu.\nPerbualan ini dipantau oleh ejen manusia pada waktu pejabat."
-            )
-            if aft:
-                msg_out += after_hours_suffix(lang)
-            sess["greeted"] = True
-            send_whatsapp_message(wa_from, add_footer(msg_out, lang))
-            return JSONResponse({"status": "greeted"})
-
-        # -------- Warranty Lookup --------
+        # -------- Warranty --------
         if 6 <= len(lower) <= 20:
             row = warranty_lookup_by_dongle(body)
             if row:
                 msg_out = (
                     f"Here is the warranty status: {warranty_text_from_row(row)}"
-                    if lang == "EN"
-                    else f"Inilah status waranti: {warranty_text_from_row(row)}"
+                    if lang == "EN" else
+                    f"Inilah status waranti: {warranty_text_from_row(row)}"
                 )
                 if aft:
                     msg_out += after_hours_suffix(lang)
@@ -390,14 +342,14 @@ async def webhook(request: Request):
                 send_whatsapp_message(wa_from, add_footer(msg_out, lang))
                 return JSONResponse({"status": "warranty"})
 
-        # -------- Car Support Flow --------
+        # -------- Car Support --------
         if detect_car_support_query(body):
             year = extract_year(body)
             if year and year < MIN_SUPPORTED_YEAR:
                 msg_out = (
-                    f"Apologies, KommuAssist only supports cars from {MIN_SUPPORTED_YEAR} onwards."
+                    f"Sorry, KommuAssist supports cars from {MIN_SUPPORTED_YEAR} onwards."
                     if lang == "EN" else
-                    f"Maaf, KommuAssist hanya menyokong kereta dari tahun {MIN_SUPPORTED_YEAR} dan ke atas."
+                    f"Maaf, KommuAssist hanya menyokong kereta dari tahun {MIN_SUPPORTED_YEAR} ke atas."
                 )
                 send_whatsapp_message(wa_from, add_footer(msg_out, lang))
                 return JSONResponse({"status": "car_not_supported"})
@@ -409,9 +361,9 @@ async def webhook(request: Request):
                 )
                 send_whatsapp_message(wa_from, add_footer(msg_out, lang))
                 return JSONResponse({"status": "car_need_details"})
-            # if year ok, fallthrough to RAG
+            # if year ok, continue to RAG
 
-        # -------- RAG Default --------
+        # -------- RAG --------
         answer = run_rag_dual(body, lang_hint=lang)
         if answer:
             if aft:
@@ -422,9 +374,9 @@ async def webhook(request: Request):
 
         # -------- Fallback --------
         msg_out = (
-            "I can help with pricing, installation, office hours, warranty, test drives, and general product support."
-            if lang == "EN"
-            else "Saya boleh bantu dengan harga, pemasangan, waktu pejabat, waranti, pandu uji, dan sokongan produk umum."
+            "I can assist with pricing, installation, office hours, warranty, test drives, and support questions."
+            if lang == "EN" else
+            "Saya boleh bantu dengan harga, pemasangan, waktu pejabat, waranti, pandu uji, dan soalan sokongan."
         )
         if aft:
             msg_out += after_hours_suffix(lang)
