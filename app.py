@@ -65,6 +65,14 @@ def add_footer(answer: str, lang: str) -> str:
     footer = FOOTER_BM if lang == "BM" else FOOTER_EN
     return (answer or "").rstrip() + footer
 
+def filter_hallucinated_links(answer: str, context: str) -> str:
+    """Remove any links not present in context"""
+    urls = re.findall(r"(https?://\S+)", answer)
+    for u in urls:
+        if u not in context:
+            answer = answer.replace(u, "")
+    return answer.strip()
+
 # ----------------- Cloud API Send -----------------
 def send_whatsapp_message(to: str, text: str):
     url = f"https://graph.facebook.com/v17.0/{WHATSAPP_PHONE_ID}/messages"
@@ -84,24 +92,38 @@ def send_whatsapp_message(to: str, text: str):
             log.error(f"[Kai] Send fail {r.status_code}: {r.text}")
     except Exception as e:
         log.error(f"[Kai] Send error: {e}")
-
 # ----------------- RAG + LLM -----------------
-def run_rag(user_text: str, lang_hint: str = "EN", intent_hint: str | None = None) -> str:
-    if not rag:
-        return ""
-    context = rag.build_context(user_text, topk=4)
-    sys = (
+def run_rag_dual(user_text: str, lang_hint: str = "EN") -> str:
+    sys_prompt = (
         "You are Kai, Kommu’s assistant.\n"
-        "- Reply only from context.\n- No emojis. Max 2 links."
+        "- Reply ONLY using the provided context.\n"
+        "- Do NOT invent or make up links.\n"
+        "- If the info is not in the context, say you don’t know.\n"
+        "- No emojis. Maximum 2 links."
     )
     lang_instruction = "Jawab dalam BM." if lang_hint == "BM" else "Answer in English."
-    prompt = f"User: {user_text}\n\nContext:\n{context}\n\n{lang_instruction}"
-    try:
-        llm = chat_completion(sys, prompt)
-    except Exception as e:
-        log.info(f"[Kai] ERR chat_completion: {e}")
-        llm = ""
-    return llm.strip() if llm else ""
+
+    # Step 1: SOP RAG
+    context = rag_sop.build_context(user_text, topk=4) if rag_sop else ""
+    if context.strip():
+        prompt = f"User: {user_text}\n\nContext:\n{context}\n\n{lang_instruction}"
+        llm = chat_completion(sys_prompt, prompt)
+        llm = filter_hallucinated_links(llm, context)
+        if llm:
+            return llm
+
+    # Step 2: Website RAG
+    context = rag_web.build_context(user_text, topk=4) if rag_web else ""
+    if context.strip():
+        prompt = f"User: {user_text}\n\nContext:\n{context}\n\n{lang_instruction}"
+        llm = chat_completion(sys_prompt, prompt)
+        llm = filter_hallucinated_links(llm, context)
+        if llm:
+            return llm
+
+    # Step 3: Nothing found
+    return ""
+
 
 def maybe_add_la_hint(user_id, msg, lang):
     update_reply_state(user_id)
@@ -110,17 +132,25 @@ def maybe_add_la_hint(user_id, msg, lang):
         hint = " Jika perlu ejen manusia, taip LA." if lang=="BM" else " If you need a live agent, type LA."
         msg += "\n" + hint
     return msg
+
 # ----------------- RAG load on startup -----------------
 def load_rag():
-    global rag
+    global rag_sop, rag_web
     try:
-        rag = RAGEngine(k=4)
-        log.info("[Kai] RAG loaded")
+        rag_sop = RAGEngine(k=4, base_dir=os.path.join(RAG_DIR, "faiss_index"))
+        log.info("[Kai] SOP RAG loaded")
     except Exception as e:
-        log.info(f"[Kai] RAG not available: {e}")
-        rag = None
+        log.info(f"[Kai] SOP RAG not available: {e}")
+        rag_sop = None
+    try:
+        rag_web = RAGEngine(k=4, base_dir=os.path.join(RAG_DIR, "faiss_index_web"))
+        log.info("[Kai] Website RAG loaded")
+    except Exception as e:
+        log.info(f"[Kai] Website RAG not available: {e}")
+        rag_web = None
 
-rag = None
+
+rag_sop, rag_web = None, None
 try:
     if SOP_DOC_URL:
         txt = fetch_sop_doc_text()
@@ -131,17 +161,19 @@ try:
                 json.dump(qas, f, ensure_ascii=False, indent=2)
             rebuild_rag()
             load_rag()
-            print(f"[SOP-DOC] Loaded {len(qas)} Q/A from Google Doc and rebuilt RAG.")
+            print(f"[SOP-DOC] Loaded {len(qas)} Q/A from Google Doc and rebuilt SOP RAG.")
     else:
         load_rag()
     fetch_warranty_all()
 except Exception as e:
     print("[Startup] Error:", e)
 
+
 @app.on_event("startup")
 def startup_event():
     init_db()
     log.info("[Kai] sessions.db initialized")
+
 
 @repeat_every(seconds=86400)
 def auto_refresh():
@@ -155,12 +187,11 @@ def auto_refresh():
                     json.dump(qas,f,ensure_ascii=False,indent=2)
                 rebuild_rag()
                 load_rag()
-        scrape_site()
+        scrape_site()  # refresh website data
         fetch_warranty_all()
         print("[AutoRefresh] Done")
     except Exception as e:
         print("[AutoRefresh] Error", e)
-
 # ----------------- Routes -----------------
 @app.get("/", response_class=PlainTextResponse)
 @app.get("/health", response_class=PlainTextResponse)
@@ -200,6 +231,24 @@ async def admin_unfreeze(request: Request):
     freeze(user_id, False, mode="user")
     log.info(f"[ADMIN] Unfrozen {user_id}")
     return PlainTextResponse("Unfrozen")
+
+# ----------------- Admin Reset Memory -----------------
+@app.api_route("/admin/reset", methods=["POST", "GET"])
+async def admin_reset(request: Request):
+    token = (request.query_params.get("token") or (await request.form()).get("token") or "")
+    user_id = request.query_params.get("user_id") or (await request.form()).get("user_id")
+    if token != ADMIN_TOKEN:
+        return PlainTextResponse("Forbidden", 403)
+    import sqlite3
+    conn = sqlite3.connect("sessions.db")
+    cur = conn.cursor()
+    cur.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+    cur.execute("DELETE FROM qna_log WHERE user_id=?", (user_id,))
+    conn.commit()
+    conn.close()
+    log.info(f"[ADMIN] Reset session for {user_id}")
+    return PlainTextResponse(f"Reset session for {user_id}")
+
 # ----------------- Webhook POST -----------------
 @app.post("/webhook")
 async def webhook(request: Request):
@@ -310,7 +359,7 @@ async def webhook(request: Request):
                 return JSONResponse({"status": "warranty"})
 
         # -------- RAG Default --------
-        answer = run_rag(body, lang_hint=lang)
+        answer = run_rag_dual(body, lang_hint=lang)
         if answer:
             if aft:
                 answer += after_hours_suffix(lang)
