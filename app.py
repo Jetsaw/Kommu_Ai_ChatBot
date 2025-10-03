@@ -122,26 +122,34 @@ def send_whatsapp_message(to: str, text: str):
     except Exception as e:
         log.error(f"[Kai] Send error: {e}")
 # ----------------- Car Support Helpers -----------------
+def load_supported_cars():
+    try:
+        with open(os.path.join(RAG_DIR, "website_data.json"), "r", encoding="utf-8") as f:
+            data = json.load(f)
+            # Normalize: wrap list into dict
+            if isinstance(data, list):
+                return {"cars": data}
+            return data
+    except Exception:
+        return {"cars": []}
+
+SUPPORTED_CARS = load_supported_cars()
+
 def detect_car_support_query(text: str) -> bool:
-    car_keywords = ["myvi", "perodua", "honda", "toyota", "proton", "kereta", "car", "support", "pasang", "compatible"]
+    car_keywords = [
+        "myvi", "perodua", "honda", "toyota", "proton", "nissan", "mazda",
+        "chery", "tiggo", "omoda", "byd", "geely", "kereta", "car", "support", "compatible"
+    ]
     return any(k in text.lower() for k in car_keywords)
 
 def extract_year(text: str) -> int | None:
     m = re.search(r"\b(19|20)\d{2}\b", text)
     return int(m.group()) if m else None
 
-def load_supported_cars():
-    try:
-        with open(os.path.join(RAG_DIR, "website_data.json"), "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-SUPPORTED_CARS = load_supported_cars()
-
 def get_supported_variants(model: str):
     results = []
-    for entry in SUPPORTED_CARS.get("cars", []):
+    cars_data = SUPPORTED_CARS["cars"] if isinstance(SUPPORTED_CARS, dict) else SUPPORTED_CARS
+    for entry in cars_data:
         if model.lower() in entry["model"].lower():
             results.append(entry)
     return results
@@ -153,13 +161,13 @@ def run_rag_dual(user_text: str, lang_hint: str = "EN", user_id: str = None) -> 
         "- Always answer in a friendly and respectful tone.\n"
         "- Reply ONLY using the provided context.\n"
         "- Do NOT invent or make up links.\n"
-        "- Only include links that are explicitly in the context or from the known official sources.\n"
-        "- If the info is not in the context, politely say you don’t know.\n"
-        "- No emojis. Maximum 2 links."
+        "- Only include links from context or official sources.\n"
+        "- If info is not found, politely say you don’t know.\n"
+        "- No emojis. Max 2 links."
     )
     lang_instruction = "Jawab dalam BM dengan nada mesra." if lang_hint == "BM" else "Answer politely in English."
 
-    # 🆕 Include conversation history
+    # Conversation history
     history_text = ""
     if user_id:
         history = get_history(user_id)
@@ -258,6 +266,26 @@ def auto_refresh():
         print("[AutoRefresh] Error", e)
 
 # ----------------- Admin Endpoints -----------------
+@app.api_route("/admin/freeze", methods=["POST", "GET"])
+async def admin_freeze(request: Request):
+    token = request.query_params.get("token") or (await request.form()).get("token") or ""
+    user_id = request.query_params.get("user_id") or (await request.form()).get("user_id")
+    if token != ADMIN_TOKEN:
+        return PlainTextResponse("Forbidden", 403)
+    freeze(user_id, True, mode="admin")
+    log.info(f"[ADMIN] Freeze user {user_id}")
+    return PlainTextResponse("Frozen")
+
+@app.api_route("/admin/unfreeze", methods=["POST", "GET"])
+async def admin_unfreeze(request: Request):
+    token = request.query_params.get("token") or (await request.form()).get("token") or ""
+    user_id = request.query_params.get("user_id") or (await request.form()).get("user_id")
+    if token != ADMIN_TOKEN:
+        return PlainTextResponse("Forbidden", 403)
+    freeze(user_id, False, mode="user")
+    log.info(f"[ADMIN] Unfrozen {user_id}")
+    return PlainTextResponse("Unfrozen")
+
 @app.api_route("/admin/refresh", methods=["POST", "GET"])
 async def admin_refresh(request: Request):
     token = request.query_params.get("token") or (await request.form()).get("token") or ""
@@ -276,29 +304,25 @@ async def admin_refresh(request: Request):
         return PlainTextResponse("Manual refresh completed")
     except Exception as e:
         return PlainTextResponse(f"Error during refresh: {e}", 500)
-# ----------------- Admin Endpoint: Scrape Car List -----------------
+
 @app.api_route("/admin/scrape", methods=["POST", "GET"])
 async def admin_scrape(request: Request):
     token = request.query_params.get("token") or (await request.form()).get("token") or ""
     if token != ADMIN_TOKEN:
         return PlainTextResponse("Forbidden", 403)
     try:
-        from web_scraper import scrape
-        data = scrape()
-        # Reload into memory after scraping
+        data = scrape_site()
         global SUPPORTED_CARS
-        SUPPORTED_CARS = data
-        return PlainTextResponse(f"Scraped {len(SUPPORTED_CARS.get('cars', []))} cars successfully")
+        SUPPORTED_CARS = load_supported_cars()
+        log.info(f"[ADMIN] Scraped {len(SUPPORTED_CARS.get('cars', []))} cars")
+        return PlainTextResponse("Scrape completed")
     except Exception as e:
         return PlainTextResponse(f"Error during scrape: {e}", 500)
-
 # ----------------- Webhook POST -----------------
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
         data = await request.json()
-        log.info(f"[Kai] IN: {json.dumps(data)}")
-
         entry = data.get("entry", [])
         if not entry:
             return JSONResponse({"status": "no_entry"})
@@ -315,14 +339,18 @@ async def webhook(request: Request):
         msg_type = msg.get("type")
         body = ""
 
-        # -------- Unsupported message types --------
+        # 🆕 Clean logging
+        log.info("[Kai] IN: from=%s type=%s text=%s",
+                 wa_from, msg_type, msg.get("text", {}).get("body"))
+
+        # Unsupported message types
         if msg_type == "text":
             body = msg["text"]["body"].strip()
         else:
             freeze(wa_from, True, mode="user")
             send_whatsapp_message(
                 wa_from,
-                add_footer("I received a media message that I cannot process. A live agent will assist you.", "EN")
+                add_footer("We received an unsupported media. A live agent will assist you.", "EN")
             )
             return JSONResponse({"status": "unsupported"})
 
@@ -332,21 +360,19 @@ async def webhook(request: Request):
         # -------- Session + Language --------
         lower = norm(body)
         sess = get_session(wa_from)
-        lang_detected = "BM" if is_malay(body) else "EN"
-        lang = lang_detected if sess["lang"] != lang_detected else sess["lang"]
+        lang = "BM" if is_malay(body) else "EN"
         set_lang(wa_from, lang)
         aft = not is_office_hours()
 
-        # -------- Memory: save user message --------
+        # Save user message
         add_message_to_history(wa_from, "user", body)
+        log.info(f"[Kai] Detected language={lang} for user={wa_from}")
 
         # -------- Greeting --------
-        if not sess["greeted"] and has_any(["hi","hello","hai","helo","mula","start","menu"], lower) and len(lower.split()) <= 3:
-            msg_out = (
-                "Hi! I'm Kai - Kommu Chatbot\nThis conversation is handled by a chatbot (beta)."
-                if lang == "EN" else
-                "Hai! Saya Kai - Chatbot Kommu\nPerbualan ini dikendalikan oleh chatbot (beta)."
-            )
+        if not sess.get("greeted") and has_any(["hi","hello","hai","helo","mula","start","menu"], lower) and len(lower.split()) <= 3:
+            msg_out = ("Hi! I'm Kai - Kommu Chatbot\nThis conversation is handled by a chatbot (beta)."
+                       if lang=="EN" else
+                       "Hai! Saya Kai - Chatbot Kommu\nPerbualan ini dikendalikan oleh chatbot (beta).")
             if aft: msg_out += after_hours_suffix(lang)
             sess["greeted"] = True
             send_whatsapp_message(wa_from, add_footer(msg_out, lang))
@@ -354,18 +380,16 @@ async def webhook(request: Request):
             return JSONResponse({"status": "greeted"})
 
         # -------- Frozen Sessions --------
-        if sess["frozen"]:
+        if sess.get("frozen"):
             if lower in {"resume","unfreeze","sambung"}:
                 freeze(wa_from, False, mode="user")
-                msg_out = "Bot resumed. How can I help?" if lang=="EN" else "Bot disambung semula. Ada apa boleh saya bantu?"
+                msg_out = "Bot resumed. How can I help?" if lang=="EN" else "Bot disambung semula. Ada apa saya boleh bantu?"
                 send_whatsapp_message(wa_from, add_footer(msg_out, lang))
                 add_message_to_history(wa_from, "bot", msg_out)
                 return JSONResponse({"status": "resumed"})
-            msg_out = (
-                "A live agent will assist you soon.\n\n👉 Type *resume* if you want to continue with the bot."
-                if lang=="EN" else
-                "Seorang ejen manusia akan menghubungi anda.\n\n👉 Taip *resume* untuk terus berbual dengan bot."
-            )
+            msg_out = ("A live agent will assist you soon.\n\n👉 Type *resume* to continue with the bot."
+                       if lang=="EN" else
+                       "Seorang ejen manusia akan menghubungi anda.\n\n👉 Taip *resume* untuk terus berbual dengan bot.")
             send_whatsapp_message(wa_from, add_footer(msg_out, lang))
             add_message_to_history(wa_from, "bot", msg_out)
             return JSONResponse({"status": "frozen"})
@@ -373,75 +397,92 @@ async def webhook(request: Request):
         # -------- Live Agent Request --------
         if has_any(["la","human","request human"], lower):
             freeze(wa_from, True, mode="user")
-            msg_out = (
-                "A live agent will reach out during office hours. Chat is now frozen."
-                if lang=="EN" else
-                "Seorang ejen manusia akan hubungi anda pada waktu pejabat. Chat dibekukan."
-            )
+            msg_out = ("A live agent will reach out during office hours. Chat is now frozen."
+                       if lang=="EN" else
+                       "Seorang ejen manusia akan hubungi anda pada waktu pejabat. Chat dibekukan.")
             send_whatsapp_message(wa_from, add_footer(msg_out, lang))
             add_message_to_history(wa_from, "bot", msg_out)
             return JSONResponse({"status": "agent"})
 
-        # -------- Car Support Logic --------
+        # -------- Continuity: Car Unknown (ACC & LKA) --------
+        last_intent = get_last_intent(wa_from)
+        if last_intent == "car_unknown":
+            if has_any(["yes","ya","ok","baik"], lower):
+                msg_out = ("Great! Since your car has ACC & LKA, you may be interested in a Kommu test drive.\n"
+                           "👉 Book here: https://calendly.com/kommuassist/test-drive\n\n"
+                           "Please also send us a picture of your steering wheel so our CS team can verify. "
+                           "Your chat will be handed over to a live agent, but you can type *resume* to continue with the bot."
+                           if lang=="EN" else
+                           "Bagus! Oleh kerana kereta anda ada ACC & LKA, anda mungkin berminat untuk pandu uji Kommu.\n"
+                           "👉 Tempah di sini: https://calendly.com/kommuassist/test-drive\n\n"
+                           "Sila juga hantar gambar stereng kereta anda supaya pasukan CS boleh sahkan. "
+                           "Perbualan anda akan dihantar ke ejen manusia, tetapi anda boleh taip *resume* untuk terus berbual dengan bot.")
+                freeze(wa_from, True, mode="user")
+                set_last_intent(wa_from, None)
+                send_whatsapp_message(wa_from, add_footer(msg_out, lang))
+                add_message_to_history(wa_from, "bot", msg_out)
+                return JSONResponse({"status": "car_unknown_acc_lka"})
+            elif has_any(["no","tak","tidak"], lower):
+                msg_out = ("Thank you. Without ACC & LKA, your car may not be supported."
+                           if lang=="EN" else
+                           "Terima kasih. Tanpa ACC & LKA, kereta anda mungkin tidak disokong.")
+                set_last_intent(wa_from, None)
+                send_whatsapp_message(wa_from, add_footer(msg_out, lang))
+                add_message_to_history(wa_from, "bot", msg_out)
+                return JSONResponse({"status": "car_unknown_no_acc_lka"})
+
+        # -------- Warranty Lookup --------
+        if 6 <= len(body) <= 20:
+            row = warranty_lookup_by_dongle(body)
+            if row:
+                msg_out = (f"Warranty status: {warranty_text_from_row(row)}"
+                           if lang=="EN" else
+                           f"Status waranti: {warranty_text_from_row(row)}")
+                if aft: msg_out += after_hours_suffix(lang)
+                msg_out = maybe_add_la_hint(wa_from, msg_out, lang)
+                send_whatsapp_message(wa_from, add_footer(msg_out, lang))
+                add_message_to_history(wa_from, "bot", msg_out)
+                return JSONResponse({"status": "warranty"})
+
+        # -------- Car Support --------
         if detect_car_support_query(body):
             model = None
-            for entry in SUPPORTED_CARS.get("cars", []):
+            cars_data = SUPPORTED_CARS["cars"] if isinstance(SUPPORTED_CARS, dict) else SUPPORTED_CARS
+            for entry in cars_data:
                 if entry["model"].lower() in lower:
                     model = entry["model"]
                     break
 
-            if "what" in lower and model:  # e.g. "what myvi is supported"
+            if not model:
+                msg_out = ("I’m not sure about that car. Does it have ACC & LKA?"
+                           if lang=="EN" else
+                           "Saya tidak pasti tentang kereta itu. Adakah ia ada ACC & LKA?")
+                set_last_intent(wa_from, "car_unknown")
+                send_whatsapp_message(wa_from, add_footer(msg_out, lang))
+                add_message_to_history(wa_from, "bot", msg_out)
+                return JSONResponse({"status": "car_unknown"})
+
+            # Known model → list variants
+            if "what" in lower:
                 variants = get_supported_variants(model)
                 if variants:
-                    msg_out = (
-                        f"Here are supported {model} variants:\n" +
-                        "\n".join([f"- {v['variant']} ({v['year']})" for v in variants])
-                        if lang=="EN" else
-                        f"Berikut adalah varian {model} yang disokong:\n" +
-                        "\n".join([f"- {v['variant']} ({v['year']})" for v in variants])
-                    )
+                    msg_out = (f"Here are supported {model} variants:\n" +
+                               "\n".join([f"- {v['variant']} ({v['year']})" for v in variants])
+                               if lang=="EN" else
+                               f"Berikut varian {model} yang disokong:\n" +
+                               "\n".join([f"- {v['variant']} ({v['year']})" for v in variants]))
                     send_whatsapp_message(wa_from, add_footer(msg_out, lang))
                     add_message_to_history(wa_from, "bot", msg_out)
                     return JSONResponse({"status": "car_list"})
 
             year = extract_year(body)
             if year and year < MIN_SUPPORTED_YEAR:
-                msg_out = (
-                    f"Sorry, KommuAssist supports cars from {MIN_SUPPORTED_YEAR} onwards."
-                    if lang=="EN" else
-                    f"Maaf, KommuAssist hanya menyokong kereta dari tahun {MIN_SUPPORTED_YEAR} ke atas."
-                )
+                msg_out = (f"Sorry, KommuAssist supports cars from {MIN_SUPPORTED_YEAR} onwards."
+                           if lang=="EN" else
+                           f"Maaf, KommuAssist hanya menyokong kereta dari {MIN_SUPPORTED_YEAR} ke atas.")
                 send_whatsapp_message(wa_from, add_footer(msg_out, lang))
                 add_message_to_history(wa_from, "bot", msg_out)
                 return JSONResponse({"status": "car_not_supported"})
-
-            if not year:
-                msg_out = (
-                    "Could you tell me your car variant and year? (e.g., Myvi 2019 H Spec)\n"
-                    "If you’re not sure, does your car have ACC (Adaptive Cruise Control) and LKA (Lane Keep Assist)?"
-                    if lang=="EN" else
-                    "Boleh beritahu varian dan tahun kereta anda? (cth: Myvi 2019 H Spec)\n"
-                    "Jika anda tidak pasti, adakah kereta anda ada ACC (Adaptive Cruise Control) dan LKA (Lane Keep Assist)?"
-                )
-                set_last_intent(wa_from, "car_support")
-                send_whatsapp_message(wa_from, add_footer(msg_out, lang))
-                add_message_to_history(wa_from, "bot", msg_out)
-                return JSONResponse({"status": "car_need_details"})
-
-        # -------- Warranty Lookup --------
-        if 6 <= len(lower) <= 20:
-            row = warranty_lookup_by_dongle(body)
-            if row:
-                msg_out = (
-                    f"Warranty status: {warranty_text_from_row(row)}"
-                    if lang=="EN" else
-                    f"Status waranti: {warranty_text_from_row(row)}"
-                )
-                if aft: msg_out += after_hours_suffix(lang)
-                msg_out = maybe_add_la_hint(wa_from, msg_out, lang)
-                send_whatsapp_message(wa_from, add_footer(msg_out, lang))
-                add_message_to_history(wa_from, "bot", msg_out)
-                return JSONResponse({"status": "warranty"})
 
         # -------- RAG Default --------
         answer = run_rag_dual(body, lang_hint=lang, user_id=wa_from)
@@ -453,11 +494,9 @@ async def webhook(request: Request):
             return JSONResponse({"status": "answered"})
 
         # -------- Hard Fallback --------
-        msg_out = (
-            "I can help with pricing, installation, office hours, warranty, test drives, and support questions."
-            if lang=="EN" else
-            "Saya boleh bantu dengan harga, pemasangan, waktu pejabat, waranti, pandu uji, dan soalan sokongan."
-        )
+        msg_out = ("I can help with pricing, installation, office hours, warranty, test drives, and support."
+                   if lang=="EN" else
+                   "Saya boleh bantu dengan harga, pemasangan, waktu pejabat, waranti, pandu uji, dan sokongan produk.")
         if aft: msg_out += after_hours_suffix(lang)
         msg_out = maybe_add_la_hint(wa_from, msg_out, lang)
         send_whatsapp_message(wa_from, add_footer(msg_out, lang))
@@ -467,4 +506,8 @@ async def webhook(request: Request):
     except Exception as e:
         tb = traceback.format_exc()
         log.error(f"[Kai] ERR webhook: {e}\n{tb}")
+        try:
+            send_whatsapp_message(wa_from, " Sorry, I had a technical issue. Please Contact Live Agent .")
+        except:
+            pass
         return JSONResponse({"status": "error", "error": str(e)})
