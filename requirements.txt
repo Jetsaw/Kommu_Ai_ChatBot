@@ -27,3 +27,5 @@ beautifulsoup4==4.12.3
 # Utils
 fastapi-utils==0.7.0
 typing-inspect
+
+deep-translator==1.11.4

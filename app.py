@@ -4,7 +4,7 @@ from datetime import datetime
 import pytz, re, os, json, traceback, logging
 from logging.handlers import RotatingFileHandler
 import requests
-from googletrans import Translator
+from deep_translator import GoogleTranslator
 
 from config import (
     TZ_REGION, OFFICE_START, OFFICE_END, PORT,
@@ -35,7 +35,6 @@ logging.basicConfig(level=logging.INFO, handlers=[handler])
 log = logging.getLogger("kai")
 
 DEBUG_QA = os.getenv("DEBUG_QA", "1") == "1"
-translator = Translator()
 
 # Meta API (Cloud API)
 VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "Kommu_Bot")
@@ -45,7 +44,7 @@ WHATSAPP_PHONE_ID = os.getenv("META_PHONE_NUMBER_ID", "")
 app = FastAPI(title="Kai - Kommu Chatbot")
 
 FOOTER_EN = "\n\nI am Kai, Kommu’s support chatbot (beta). Please send your questions one by one. If you’d like a live agent, type LA."
-FOOTER_BM = "\n\nSaya Kai, chatbot sokongan Kommu (beta). Sila hantar soalan satu demi satu. Jika anda mahu bercakap dengan ejen manusia, taip LA."
+FOOTER_BM = "\n\nSaya Kai, chatbot sokongan Kommu (beta). Sila hantar soalan anda satu demi satu. Jika anda mahu bercakap dengan ejen manusia, taip LA."
 
 # ----------------- Allowed Links -----------------
 ALLOWED_LINKS = [
@@ -133,7 +132,7 @@ def run_rag_dual(user_text: str, lang_hint: str = "EN") -> str:
         llm = enforce_link_intents(user_text, llm)
         if llm:
             if lang_hint == "BM":
-                llm = translator.translate(llm, src="en", dest="ms").text
+                llm = GoogleTranslator(source="en", target="ms").translate(llm)
             return llm
 
     # Step 2: Website RAG
@@ -145,7 +144,7 @@ def run_rag_dual(user_text: str, lang_hint: str = "EN") -> str:
         llm = enforce_link_intents(user_text, llm)
         if llm:
             if lang_hint == "BM":
-                llm = translator.translate(llm, src="en", dest="ms").text
+                llm = GoogleTranslator(source="en", target="ms").translate(llm)
             return llm
 
     return ""
@@ -261,8 +260,13 @@ async def webhook(request: Request):
             body = msg["text"]["body"].strip()
         else:
             freeze(wa_from, True, mode="user")
-            send_whatsapp_message(wa_from,
-                add_footer("I received a media message that I cannot process. A live agent will assist you.", "EN"))
+            send_whatsapp_message(
+                wa_from,
+                add_footer(
+                    "I received a media message that I cannot process. A live agent will assist you.",
+                    "EN"
+                )
+            )
             return JSONResponse({"status": "unsupported"})
 
         if not body:
