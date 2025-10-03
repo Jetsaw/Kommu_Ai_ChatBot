@@ -43,3 +43,6 @@ BING_API_KEY = os.getenv("BING_API_KEY", "")
 
 # Minimum supported car year 
 MIN_SUPPORTED_YEAR = 2016
+
+# Memory settings
+MEMORY_DEPTH = 5  

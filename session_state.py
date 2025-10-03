@@ -1,123 +1,91 @@
-# session_state.py
-import sqlite3
-import os
-import datetime
+import sqlite3, json, os
+from datetime import datetime
+from config import MEMORY_DEPTH
 
-DB_PATH = "sessions.db"
+DB_PATH = os.getenv("SESSION_DB_PATH", "sessions.db")
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("""
+    c = conn.cursor()
+    c.execute("""
     CREATE TABLE IF NOT EXISTS sessions (
         user_id TEXT PRIMARY KEY,
-        lang TEXT,
-        frozen INTEGER DEFAULT 0,
-        frozen_mode TEXT,
-        reply_count INTEGER DEFAULT 0,
-        greeted INTEGER DEFAULT 0,
-        last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        last_intent TEXT
-    )
-    """)
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS qna_log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id TEXT,
-        question TEXT,
-        answer TEXT,
-        lang TEXT,
-        intent TEXT,
-        after_hours INTEGER,
-        frozen INTEGER,
-        status TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        data TEXT
     )
     """)
     conn.commit()
     conn.close()
 
-# ----------------- Session helpers -----------------
 def get_session(user_id: str):
     conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM sessions WHERE user_id=?", (user_id,))
-    row = cur.fetchone()
-
-    # Expire after 1 hour of inactivity
+    c = conn.cursor()
+    c.execute("SELECT data FROM sessions WHERE user_id=?", (user_id,))
+    row = c.fetchone()
+    conn.close()
     if row:
         try:
-            last_seen = datetime.datetime.strptime(row["last_seen"], "%Y-%m-%d %H:%M:%S")
-            if (datetime.datetime.now() - last_seen).total_seconds() > 3600:
-                cur.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
-                conn.commit()
-                row = None
-        except Exception:
-            cur.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
-            conn.commit()
-            row = None
+            return json.loads(row[0])
+        except:
+            return {}
+    return {
+        "lang": None,
+        "frozen": False,
+        "reply_count": 0,
+        "greeted": False,
+        "last_intent": None,
+        "history": []   
+    }
 
-    if not row:
-        cur.execute("""
-        INSERT INTO sessions (user_id, lang, frozen, frozen_mode, reply_count, greeted, last_seen, last_intent)
-        VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP,NULL)
-        """, (user_id, None, 0, None, 0, 0))
-        conn.commit()
-        cur.execute("SELECT * FROM sessions WHERE user_id=?", (user_id,))
-        row = cur.fetchone()
-
-    cur.execute("UPDATE sessions SET last_seen=CURRENT_TIMESTAMP WHERE user_id=?", (user_id,))
+def save_session(user_id: str, data: dict):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("REPLACE INTO sessions (user_id, data) VALUES (?,?)", (user_id, json.dumps(data)))
     conn.commit()
     conn.close()
-    return dict(row)
 
 def set_lang(user_id: str, lang: str):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("UPDATE sessions SET lang=?, last_seen=CURRENT_TIMESTAMP WHERE user_id=?", (lang, user_id))
-    conn.commit()
-    conn.close()
+    sess = get_session(user_id)
+    sess["lang"] = lang
+    save_session(user_id, sess)
 
-def freeze(user_id: str, frozen: bool, mode: str = "user", taken_by: str | None = None):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("UPDATE sessions SET frozen=?, frozen_mode=?, last_seen=CURRENT_TIMESTAMP WHERE user_id=?",
-                (1 if frozen else 0, mode if frozen else None, user_id))
-    conn.commit()
-    conn.close()
+def freeze(user_id: str, frozen: bool, mode="user"):
+    sess = get_session(user_id)
+    sess["frozen"] = frozen
+    save_session(user_id, sess)
 
 def update_reply_state(user_id: str):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("UPDATE sessions SET reply_count=reply_count+1, last_seen=CURRENT_TIMESTAMP WHERE user_id=?", (user_id,))
-    conn.commit()
-    conn.close()
+    sess = get_session(user_id)
+    sess["reply_count"] = sess.get("reply_count", 0) + 1
+    save_session(user_id, sess)
+
+def log_qna(user_id: str, q: str, a: str):
+    sess = get_session(user_id)
+    logs = sess.get("logs", [])
+    logs.append({"q": q, "a": a, "t": datetime.utcnow().isoformat()})
+    sess["logs"] = logs[-50:]  # keep last 50
+    save_session(user_id, sess)
 
 def set_last_intent(user_id: str, intent: str | None):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("UPDATE sessions SET last_intent=?, last_seen=CURRENT_TIMESTAMP WHERE user_id=?", (intent, user_id))
-    conn.commit()
-    conn.close()
+    sess = get_session(user_id)
+    sess["last_intent"] = intent
+    save_session(user_id, sess)
 
-def get_last_intent(user_id: str) -> str | None:
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("SELECT last_intent FROM sessions WHERE user_id=?", (user_id,))
-    row = cur.fetchone()
-    conn.close()
-    return row[0] if row and row[0] else None
+def get_last_intent(user_id: str):
+    sess = get_session(user_id)
+    return sess.get("last_intent")
 
-def log_qna(user_id: str, question: str, answer: str, lang: str, intent: str, after_hours: bool, frozen: bool, status: str):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("""
-    INSERT INTO qna_log (user_id, question, answer, lang, intent, after_hours, frozen, status)
-    VALUES (?,?,?,?,?,?,?,?)
-    """, (user_id, question, answer, lang, intent, 1 if after_hours else 0, 1 if frozen else 0, status))
-    conn.commit()
-    conn.close()
+# ----------------- Multi-turn Memory -----------------
+def add_message_to_history(user_id: str, role: str, text: str):
+    """Append a message to session history, keeping only MEMORY_DEPTH turns."""
+    sess = get_session(user_id)
+    history = sess.get("history", [])
+    history.append({"role": role, "text": text})
+    if len(history) > MEMORY_DEPTH:
+        history = history[-MEMORY_DEPTH:]
+    sess["history"] = history
+    save_session(user_id, sess)
 
-# Initialize DB
-init_db()
+def get_history(user_id: str):
+    """Retrieve the recent conversation history."""
+    sess = get_session(user_id)
+    return sess.get("history", [])
