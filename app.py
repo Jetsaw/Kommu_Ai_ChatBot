@@ -101,6 +101,25 @@ def enforce_link_intents(user_text: str, answer: str) -> str:
             answer += "\n\n👉 Join our community: https://discord.gg/ / https://facebook.com/groups/"
     return answer
 
+# ----------------- Cloud API Send -----------------
+def send_whatsapp_message(to: str, text: str):
+    url = f"https://graph.facebook.com/v17.0/{WHATSAPP_PHONE_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "text",
+        "text": {"body": text}
+    }
+    try:
+        r = requests.post(url, headers=headers, json=payload, timeout=10)
+        if r.status_code >= 400:
+            log.error(f"[Kai] Send fail {r.status_code}: {r.text}")
+    except Exception as e:
+        log.error(f"[Kai] Send error: {e}")
 # ----------------- Car Support Helpers -----------------
 def detect_car_support_query(text: str) -> bool:
     car_keywords = ["myvi", "perodua", "honda", "toyota", "proton", "kereta", "car", "support", "pasang", "compatible"]
@@ -256,81 +275,112 @@ async def webhook(request: Request):
         msg_type = msg.get("type")
         body = ""
 
+        # Unsupported media
         if msg_type == "text":
             body = msg["text"]["body"].strip()
         else:
             freeze(wa_from, True, mode="user")
             send_whatsapp_message(
                 wa_from,
-                add_footer(
-                    "I received a media message that I cannot process. A live agent will assist you.",
-                    "EN"
-                )
+                add_footer("I received a media message that I cannot process. A live agent will assist you.", "EN")
             )
             return JSONResponse({"status": "unsupported"})
 
         if not body:
             return JSONResponse({"status": "empty"})
 
-        # -------- Session + Language (dynamic detection) --------
+        # -------- Session + Language --------
         lower = norm(body)
         sess = get_session(wa_from)
-
         lang_detected = "BM" if is_malay(body) else "EN"
-        if sess["lang"] != lang_detected:
-            lang = lang_detected
-        else:
-            lang = sess["lang"]
-
+        lang = lang_detected if sess["lang"] != lang_detected else sess["lang"]
         set_lang(wa_from, lang)
         aft = not is_office_hours()
 
+        # -------- Greeting --------
+        if not sess["greeted"] and has_any(["hi","hello","hai","helo","mula","start","menu"], lower) and len(lower.split()) <= 3:
+            msg_out = (
+                "Hi! I'm Kai - Kommu Chatbot\nThis conversation is handled by a chatbot (beta)."
+                if lang == "EN" else
+                "Hai! Saya Kai - Chatbot Kommu\nPerbualan ini dikendalikan oleh chatbot (beta)."
+            )
+            if aft: msg_out += after_hours_suffix(lang)
+            sess["greeted"] = True
+            send_whatsapp_message(wa_from, add_footer(msg_out, lang))
+            return JSONResponse({"status": "greeted"})
+
+        # -------- Frozen Sessions --------
+        if sess["frozen"]:
+            if lower in {"resume","unfreeze","sambung"}:
+                freeze(wa_from, False, mode="user")
+                msg_out = "Bot resumed. How can I help?" if lang=="EN" else "Bot disambung semula. Ada apa boleh saya bantu?"
+                send_whatsapp_message(wa_from, add_footer(msg_out, lang))
+                return JSONResponse({"status": "resumed"})
+            msg_out = (
+                "A live agent will assist you soon.\n\n👉 Type *resume* if you want to continue with the bot."
+                if lang=="EN" else
+                "Seorang ejen manusia akan menghubungi anda.\n\n👉 Taip *resume* untuk terus berbual dengan bot."
+            )
+            send_whatsapp_message(wa_from, add_footer(msg_out, lang))
+            return JSONResponse({"status": "frozen"})
+
+        # -------- Live Agent Request --------
+        if has_any(["la","human","request human"], lower):
+            freeze(wa_from, True, mode="user")
+            msg_out = (
+                "A live agent will reach out during office hours. Chat is now frozen."
+                if lang=="EN" else
+                "Seorang ejen manusia akan hubungi anda pada waktu pejabat. Chat dibekukan."
+            )
+            send_whatsapp_message(wa_from, add_footer(msg_out, lang))
+            return JSONResponse({"status": "agent"})
+
         # -------- Continuity: Beta Tester --------
         last_intent = get_last_intent(wa_from)
-        if last_intent == "beta_tester" and has_any(["yes", "ya", "ok", "baik", "saya mahu", "nak join"], lower):
+        if last_intent == "beta_tester" and has_any(["yes","ya","ok","baik","saya mahu","nak join"], lower):
             msg_out = (
-                "Great! You can sign up for our beta tester program here:\nhttps://kommu.ai/beta-tester"
-                if lang == "EN" else
-                "Bagus! Anda boleh daftar untuk program beta tester di sini:\nhttps://kommu.ai/beta-tester"
+                "Great! You can sign up here:\nhttps://kommu.ai/beta-tester"
+                if lang=="EN" else
+                "Bagus! Anda boleh daftar di sini:\nhttps://kommu.ai/beta-tester"
             )
             set_last_intent(wa_from, None)
             send_whatsapp_message(wa_from, add_footer(msg_out, lang))
             return JSONResponse({"status": "beta_tester_confirmed"})
         if "beta" in lower and "test" in lower:
             msg_out = (
-                "To become a beta tester, you’ll need to sign up on our program page. Would you like the link?"
-                if lang == "EN" else
-                "Untuk menjadi beta tester, anda perlu daftar di laman program kami. Mahu saya kongsikan pautan?"
+                "To become a beta tester, you need to register. Would you like the link?"
+                if lang=="EN" else
+                "Untuk menjadi beta tester, anda perlu daftar. Mahu saya kongsikan pautan?"
             )
             set_last_intent(wa_from, "beta_tester")
             send_whatsapp_message(wa_from, add_footer(msg_out, lang))
             return JSONResponse({"status": "beta_tester"})
 
         # -------- Continuity: Test Drive --------
-        if last_intent == "test_drive" and has_any(["yes", "ya", "ok", "baik", "saya mahu", "nak join"], lower):
+        if last_intent == "test_drive" and has_any(["yes","ya","ok","baik","saya mahu","nak join"], lower):
             msg_out = (
-                "Perfect! You can book a test drive here:\nhttps://calendly.com/kommuassist/test-drive"
-                if lang == "EN" else
-                "Bagus! Anda boleh tempah pandu uji di sini:\nhttps://calendly.com/kommuassist/test-drive"
+                "Perfect! Book your test drive here:\nhttps://calendly.com/kommuassist/test-drive"
+                if lang=="EN" else
+                "Bagus! Tempah pandu uji anda di sini:\nhttps://calendly.com/kommuassist/test-drive"
             )
             set_last_intent(wa_from, None)
             send_whatsapp_message(wa_from, add_footer(msg_out, lang))
             return JSONResponse({"status": "test_drive_confirmed"})
         if "test drive" in lower or "pandu uji" in lower:
             msg_out = (
-                "Would you like me to share the link to book a test drive?"
-                if lang == "EN" else
-                "Adakah anda mahu saya kongsikan pautan untuk menempah pandu uji?"
+                "Would you like me to share the booking link?"
+                if lang=="EN" else
+                "Adakah anda mahu saya kongsikan pautan tempahan?"
             )
             set_last_intent(wa_from, "test_drive")
             send_whatsapp_message(wa_from, add_footer(msg_out, lang))
             return JSONResponse({"status": "test_drive"})
 
         # -------- Continuity: Car Support --------
-        if last_intent == "car_support" and has_any(["yes", "ya", "ok", "baik"], lower):
+        if last_intent == "car_support" and has_any(["yes","ya","ok","baik"], lower):
             msg_out = (
                 f"KommuAssist supports cars from {MIN_SUPPORTED_YEAR} onwards. Please provide your car model and year."
-                if lang == "EN" else
+                if lang=="EN" else
                 f"KommuAssist menyokong kereta dari tahun {MIN_SUPPORTED_YEAR} ke atas. Sila berikan model dan tahun kereta anda."
             )
             set_last_intent(wa_from, None)
@@ -342,12 +392,11 @@ async def webhook(request: Request):
             row = warranty_lookup_by_dongle(body)
             if row:
                 msg_out = (
-                    f"Here is the warranty status: {warranty_text_from_row(row)}"
-                    if lang == "EN" else
-                    f"Inilah status waranti: {warranty_text_from_row(row)}"
+                    f"Warranty status: {warranty_text_from_row(row)}"
+                    if lang=="EN" else
+                    f"Status waranti: {warranty_text_from_row(row)}"
                 )
-                if aft:
-                    msg_out += after_hours_suffix(lang)
+                if aft: msg_out += after_hours_suffix(lang)
                 msg_out = maybe_add_la_hint(wa_from, msg_out, lang)
                 send_whatsapp_message(wa_from, add_footer(msg_out, lang))
                 return JSONResponse({"status": "warranty"})
@@ -358,16 +407,16 @@ async def webhook(request: Request):
             if year and year < MIN_SUPPORTED_YEAR:
                 msg_out = (
                     f"Sorry, KommuAssist supports cars from {MIN_SUPPORTED_YEAR} onwards."
-                    if lang == "EN" else
+                    if lang=="EN" else
                     f"Maaf, KommuAssist hanya menyokong kereta dari tahun {MIN_SUPPORTED_YEAR} ke atas."
                 )
                 send_whatsapp_message(wa_from, add_footer(msg_out, lang))
                 return JSONResponse({"status": "car_not_supported"})
             if not year:
                 msg_out = (
-                    "Could you please tell me your car variant and year? (e.g., Myvi 2019 H Spec)"
-                    if lang == "EN" else
-                    "Boleh beritahu saya varian dan tahun kereta anda? (cth: Myvi 2019 H Spec)"
+                    "Please tell me your car variant and year (e.g., Myvi 2019 H Spec)."
+                    if lang=="EN" else
+                    "Sila beritahu varian dan tahun kereta anda (cth: Myvi 2019 H Spec)."
                 )
                 set_last_intent(wa_from, "car_support")
                 send_whatsapp_message(wa_from, add_footer(msg_out, lang))
@@ -376,20 +425,18 @@ async def webhook(request: Request):
         # -------- RAG Default --------
         answer = run_rag_dual(body, lang_hint=lang)
         if answer:
-            if aft:
-                answer += after_hours_suffix(lang)
+            if aft: answer += after_hours_suffix(lang)
             answer = maybe_add_la_hint(wa_from, answer, lang)
             send_whatsapp_message(wa_from, add_footer(answer, lang))
             return JSONResponse({"status": "answered"})
 
         # -------- Hard Fallback --------
         msg_out = (
-            "I can assist with pricing, installation, office hours, warranty, test drives, and support questions."
-            if lang == "EN" else
-            "Saya boleh bantu dengan harga, pemasangan, waktu pejabat, waranti, pandu uji, dan sokongan produk."
+            "I can help with pricing, installation, office hours, warranty, test drives, and support questions."
+            if lang=="EN" else
+            "Saya boleh bantu dengan harga, pemasangan, waktu pejabat, waranti, pandu uji, dan soalan sokongan."
         )
-        if aft:
-            msg_out += after_hours_suffix(lang)
+        if aft: msg_out += after_hours_suffix(lang)
         msg_out = maybe_add_la_hint(wa_from, msg_out, lang)
         send_whatsapp_message(wa_from, add_footer(msg_out, lang))
         return JSONResponse({"status": "fallback"})
