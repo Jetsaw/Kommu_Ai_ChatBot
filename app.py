@@ -299,10 +299,16 @@ async def webhook(request: Request):
         if not body:
             return JSONResponse({"status": "empty"})
 
-        # -------- Session + Language --------
+        # -------- Session + Language (dynamic detection) --------
         lower = norm(body)
         sess = get_session(wa_from)
-        lang = sess["lang"] or ("BM" if is_malay(body) else "EN")
+
+        lang_detected = "BM" if is_malay(body) else "EN"
+        if sess["lang"] != lang_detected:
+            lang = lang_detected
+        else:
+            lang = sess["lang"]
+
         set_lang(wa_from, lang)
         aft = not is_office_hours()
 
