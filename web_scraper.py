@@ -1,59 +1,54 @@
-import requests, os, json
+import requests, json, os, logging
 from bs4 import BeautifulSoup
-from config import RAG_DIR
 
-URL = "https://kommu.ai/support/"
-OUTPUT_FILE = os.path.join(RAG_DIR, "website_data.json")
+log = logging.getLogger("kai")
+
+CAR_SUPPORT_URL = "https://kommu.ai/support/"
+OUTPUT_PATH = os.path.join("rag", "supported_cars.json")
 
 def scrape():
+    """Scrape supported car list from Kommu website and save structured JSON."""
     try:
-        print("[Scraper] Fetching support page…")
-        r = requests.get(URL, timeout=20)
-        r.raise_for_status()
-        soup = BeautifulSoup(r.text, "html.parser")
+        res = requests.get(CAR_SUPPORT_URL, timeout=20)
+        if res.status_code != 200:
+            raise Exception(f"Failed to fetch page, status={res.status_code}")
 
-        cars = []
-        # Example assumption: cars listed in <div class="car-model"> with sub-info
-        # Adjust selectors based on real page structure
-        for block in soup.select(".car-model, .supported-car, .car-item"):
-            model = block.find("h3") or block.find("h2")
-            if not model:
+        soup = BeautifulSoup(res.text, "html.parser")
+        sections = soup.find_all(["h3", "h4", "p", "li"])
+
+        supported, current_brand = [], None
+        for tag in sections:
+            text = tag.get_text(strip=True)
+            if not text:
                 continue
-            model_name = model.get_text(strip=True)
 
-            variants = []
-            for li in block.find_all("li"):
-                txt = li.get_text(" ", strip=True)
-                if txt:
-                    variants.append(txt)
+            if text.lower() in ["perodua", "proton", "honda", "toyota", "byd", "lexus"]:
+                current_brand = text
+                continue
 
-            if variants:
-                for v in variants:
-                    # Try to split variant and year (example: "Myvi 2019 H Spec")
-                    year = None
-                    for word in v.split():
-                        if word.isdigit() and len(word) == 4:
-                            year = int(word)
-                            break
-                    cars.append({
-                        "model": model_name,
-                        "variant": v,
-                        "year": year or ""
-                    })
-            else:
-                cars.append({"model": model_name, "variant": "Unknown", "year": ""})
+            if current_brand:
+                if "(" in text and ")" in text:
+                    model = text.split("(")[0].strip()
+                    details = text.split("(", 1)[1].rstrip(")").strip()
+                else:
+                    model, details = text.strip(), ""
+                supported.append({
+                    "brand": current_brand,
+                    "model": model,
+                    "details": details
+                })
 
-        data = {"cars": cars}
-        os.makedirs(RAG_DIR, exist_ok=True)
-        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
+        with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
+            json.dump({"cars": supported}, f, ensure_ascii=False, indent=2)
 
-        print(f"[Scraper] Saved {len(cars)} cars → {OUTPUT_FILE}")
-        return data
+        log.info(f"[AutoCar]  Scraped {len(supported)} supported car entries from Kommu.ai.")
+        return supported
 
     except Exception as e:
-        print("[Scraper] Error:", e)
-        return {"cars": []}
+        log.error(f"[AutoCar]  Error scraping: {e}")
+        return []
 
 if __name__ == "__main__":
-    scrape()
+    data = scrape()
+    print(json.dumps(data, indent=2, ensure_ascii=False))
