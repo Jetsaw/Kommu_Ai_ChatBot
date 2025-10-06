@@ -6,6 +6,7 @@ from logging.handlers import RotatingFileHandler
 import requests
 from deep_translator import GoogleTranslator
 from bs4 import BeautifulSoup
+from web_scraper import scrape as scrape_site
 
 from config import (
     TZ_REGION, OFFICE_START, OFFICE_END, PORT,
@@ -199,7 +200,7 @@ def get_supported_variants(model: str):
     return results
 
 # ----------------- RAG + Memory -----------------
-MEMORY_LAYERS = 5  # adjustable memory window
+MEMORY_LAYERS = 5  
 
 def run_rag_dual(user_text: str, lang_hint: str = "EN", user_id: str | None = None) -> str:
     sys_prompt = (
@@ -287,16 +288,21 @@ def startup_event():
     init_db()
     log.info("[Kai] sessions.db initialized")
 
-@repeat_every(seconds=86400)
+@repeat_every(seconds=86400)  
 def auto_refresh():
-    """Daily refresh SOP and supported cars"""
+    """Daily refresh of SOP, warranty data, and supported car list from Kommu.ai."""
     try:
-        log.info("[AutoRefresh] Refreshing SOP + supported cars…")
-        scrape_supported_cars()
+        log.info("[AutoRefresh]  Starting daily data refresh...")
+        # Refresh car list
+        cars = scrape_site()
+        log.info(f"[AutoRefresh] Updated {len(cars)} supported cars from Kommu.ai.")
+        # Refresh warranty and SOP
         fetch_warranty_all()
-        log.info("[AutoRefresh] Done")
+        log.info("[AutoRefresh] Warranty list refreshed.")
+        log.info("[AutoRefresh]  Refresh completed successfully.")
     except Exception as e:
-        log.error(f"[AutoRefresh] {e}")
+        log.error(f"[AutoRefresh]  Error: {e}")
+
 
 # ----------------- Admin Endpoints -----------------
 @app.api_route("/admin/refresh", methods=["GET","POST"])
