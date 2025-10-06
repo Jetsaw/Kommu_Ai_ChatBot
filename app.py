@@ -131,38 +131,51 @@ CAR_SUPPORT_URL = "https://kommu.ai/support/"
 SUPPORTED_CAR_PATH = os.path.join(RAG_DIR, "supported_cars.json")
 
 def scrape_supported_cars():
-    """Scrape Kommu website to auto-update supported car list."""
+    """Scrape Kommu website to auto-update supported car list (handles new Elementor structure)."""
     try:
-        res = requests.get(CAR_SUPPORT_URL, timeout=15)
+        res = requests.get(CAR_SUPPORT_URL, timeout=20)
         soup = BeautifulSoup(res.text, "html.parser")
         cars = []
-        for li in soup.select("li"):
-            text = li.get_text(strip=True)
-            if not text or len(text) < 3:
-                continue
-            cars.append({"model": text})
+
+        
+        selectors = [
+            ".elementor-tab-title",      
+            ".elementor-toggle-title",   
+            "li",                        
+            "p"                          
+        ]
+
+        seen = set()
+        for selector in selectors:
+            for tag in soup.select(selector):
+                text = tag.get_text(strip=True)
+                if not text:
+                    continue
+                # Filter out common non-car words
+                if len(text) < 3 or any(w in text.lower() for w in [
+                    "support", "faq", "installation", "contact", "kommu"
+                ]):
+                    continue
+                # Keep only first two words (e.g. Perodua Myvi)
+                words = text.split()
+                if len(words) > 4:
+                    text = " ".join(words[:3])
+                if text.lower() not in seen:
+                    seen.add(text.lower())
+                    cars.append({"model": text})
+
+        # Save results
         os.makedirs(RAG_DIR, exist_ok=True)
         with open(SUPPORTED_CAR_PATH, "w", encoding="utf-8") as f:
             json.dump({"cars": cars}, f, ensure_ascii=False, indent=2)
-        log.info(f"[AutoCar] Updated {len(cars)} supported cars")
+
+        log.info(f"[AutoCar]  Scraped {len(cars)} supported cars from Kommu site")
         return cars
+
     except Exception as e:
-        log.error(f"[AutoCar] Failed to scrape: {e}")
+        log.error(f"[AutoCar]  Failed to scrape car list: {e}")
         return []
 
-def load_supported_cars():
-    """Load supported cars from local file"""
-    try:
-        if not os.path.exists(SUPPORTED_CAR_PATH):
-            scrape_supported_cars()
-        with open(SUPPORTED_CAR_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {"cars": data}
-    except Exception as e:
-        log.error(f"[AutoCar] Load error: {e}")
-        return {"cars": []}
-
-SUPPORTED_CARS = load_supported_cars()
 
 # ----------------- Car Support Helpers -----------------
 def detect_car_support_query(text: str) -> bool:
