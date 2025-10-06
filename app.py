@@ -161,7 +161,7 @@ def run_rag_dual(user_text: str, lang_hint: str = "EN", user_id: str = None) -> 
         "- Always answer in a friendly and respectful tone.\n"
         "- Reply ONLY using the provided context.\n"
         "- Do NOT invent or make up links.\n"
-        "- If the user ask in Malay reply in malay language.\n"
+        "- If the user ask in Malay,must reply in malay language.\n"
         "- Only include links from context or official sources.\n"
         "- If info is not found, politely say you don’t know.\n"
         "- No emojis. Max 3 links."
@@ -367,7 +367,7 @@ async def webhook(request: Request):
         add_message_to_history(wa_from, "user", body)
         log.info(f"[Kai] Detected language={lang} for user={wa_from}")
 
-        # -------- Greetings --------
+        # -------- Greeting --------
         if not sess.get("greeted") and has_any(["hi","hello","hai","helo","mula","start","menu"], lower) and len(lower.split()) <= 3:
             msg_out = ("Hi! I'm Kai - Kommu Chatbot. This chat is handled by a chatbot (beta)."
                        if lang=="EN" else
@@ -420,9 +420,13 @@ async def webhook(request: Request):
             model = None
             cars_data = SUPPORTED_CARS["cars"] if isinstance(SUPPORTED_CARS, dict) else SUPPORTED_CARS
 
+            # Safe partial match for models
             for entry in cars_data:
                 model_name = entry.get("model")
-                if model_name and model_name.lower() in lower:
+                if not model_name:
+                    continue
+                model_lower = model_name.lower()
+                if model_lower in lower or lower in model_lower:
                     model = model_name
                     break
 
@@ -461,12 +465,10 @@ async def webhook(request: Request):
                 return JSONResponse({"status": "car_not_supported"})
 
             msg_out = (f"Perfect — the {model} is fully supported 🎉\n"
-                       "With Kommu KA2, you’ll enjoy smoother adaptive cruise and steadier lane assistance, "
-                       "especially on long highway drives."
+                       "With Kommu KA2, you’ll enjoy smoother adaptive cruise and steadier lane assistance, especially on long highway drives."
                        if lang=="EN" else
                        f"Hebat — {model} anda disokong sepenuhnya 🎉\n"
-                       "Dengan Kommu KA2, anda akan alami cruise control lebih lancar dan bantuan lorong lebih stabil, "
-                       "terutama semasa memandu jauh di lebuh raya.")
+                       "Dengan Kommu KA2, anda akan alami cruise control lebih lancar dan bantuan lorong lebih stabil, terutama semasa memandu jauh di lebuh raya.")
             send_whatsapp_message(wa_from, add_footer(msg_out, lang))
             add_message_to_history(wa_from, "bot", msg_out)
             return JSONResponse({"status": "car_supported_confirmed"})
@@ -475,15 +477,24 @@ async def webhook(request: Request):
         last_intent = get_last_intent(wa_from)
         if last_intent == "car_unknown":
             if has_any(["yes","ya","ok","baik"], lower):
-                msg_out = ("Great! Since your car has ACC & LKA, you might be interested in a Kommu test drive.\n"
-                           " Book here: https://calendly.com/kommuassist/test-drive\n\n"
-                           "Please send a picture of your steering wheel so our CS team can confirm. "
-                           "Your chat will be handed over to a live agent, but you can type *resume* to continue with the bot."
-                           if lang=="EN" else
-                           "Bagus! Oleh kerana kereta anda ada ACC & LKA, anda mungkin berminat untuk pandu uji Kommu.\n"
-                           " Tempah di sini: https://calendly.com/kommuassist/test-drive\n\n"
-                           "Sila hantar gambar stereng untuk pengesahan CS. "
-                           "Perbualan anda akan dihantar ke ejen manusia, tetapi anda boleh taip *resume* untuk sambung dengan bot.")
+                msg_out = (
+                    "Great! Since your car has ACC & LKA, it might be compatible with Kommu soon \n\n"
+                    " Register your interest here so our team can notify you when support is ready:\n"
+                    "https://forms.gle/9XZ5VoswiX6RiDY88\n\n"
+                    "You can also book a test drive here:\n"
+                    "https://calendly.com/kommuassist/test-drive\n\n"
+                    "Please send a picture of your steering wheel so our CS team can confirm. "
+                    "Your chat will now be passed to a live agent, but you can type *resume* to continue chatting with me."
+                    if lang == "EN"
+                    else
+                    "Bagus! Oleh kerana kereta anda ada ACC & LKA, ia mungkin serasi dengan Kommu tidak lama lagi \n\n"
+                    " Daftar minat anda di pautan ini supaya pasukan kami boleh maklumkan bila sokongan tersedia:\n"
+                    "https://forms.gle/9XZ5VoswiX6RiDY88\n\n"
+                    "Anda juga boleh tempah pandu uji di sini:\n"
+                    "https://calendly.com/kommuassist/test-drive\n\n"
+                    "Sila hantar gambar stereng anda untuk pengesahan oleh pasukan CS. "
+                    "Perbualan ini akan dihantar ke ejen manusia, tetapi anda boleh taip *resume* untuk sambung berbual dengan saya."
+                )
                 freeze(wa_from, True, mode="user")
                 set_last_intent(wa_from, None)
                 send_whatsapp_message(wa_from, add_footer(msg_out, lang))
