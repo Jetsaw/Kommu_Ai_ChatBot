@@ -3,18 +3,14 @@ version: "3.9"
 services:
   kai:
     build: .
+    container_name: kommu_chatbot
     restart: unless-stopped
     ports:
-      - "6090:6090"
+      - "6090:8000"   
     env_file: .env
-    environment:
-      - PORT=6090
     volumes:
-      - kai_data:/app/data
-      - kai_rag:/app/rag
-      - kai_storage:/app/storage
-
-volumes:
-  kai_data:
-  kai_rag:
-  kai_storage:
+      - ./sessions.db:/app/sessions.db
+      - ./media:/app/media
+      - ./logs:/app/logs
+    environment:
+      - TZ=Asia/Kuala_Lumpur

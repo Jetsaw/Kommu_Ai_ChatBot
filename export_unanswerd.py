@@ -1,4 +1,3 @@
-# export_unanswered.py
 import csv
 from session_state import get_unanswered
 

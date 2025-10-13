@@ -1,10 +1,15 @@
-from fastapi import FastAPI, Request, Query
+# ----------------- Imports -----------------
+from fastapi import FastAPI, Request, Query, Header
 from fastapi.responses import PlainTextResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from datetime import datetime
-import pytz, re, os, json, traceback, logging
+import pytz, re, os, json, traceback, logging, sqlite3
 from logging.handlers import RotatingFileHandler
 import requests
 from deep_translator import GoogleTranslator
+from fastapi_utils.tasks import repeat_every
+
+# ---- Kommu Internal Modules ----
 from config import (
     TZ_REGION, OFFICE_START, OFFICE_END, PORT,
     SOP_DOC_URL, WARRANTY_CSV_URL,
@@ -24,7 +29,7 @@ from session_state import (
     log_qna, init_db, set_last_intent, get_last_intent,
     add_message_to_history, get_history, reset_memory
 )
-from fastapi_utils.tasks import repeat_every
+from media_handler import handle_incoming_media, init_media_log
 
 # ----------------- Logging -----------------
 os.makedirs("logs", exist_ok=True)
@@ -32,7 +37,15 @@ handler = RotatingFileHandler("logs/kai.log", maxBytes=2_000_000, backupCount=3,
 logging.basicConfig(level=logging.INFO, handlers=[handler])
 log = logging.getLogger("kai")
 
+# ----------------- App -----------------
 app = FastAPI(title="Kai - Kommu Chatbot")
+
+# Initialize databases
+init_db()
+init_media_log()
+
+# Serve local /media folder for dashboard to access files
+app.mount("/media", StaticFiles(directory="media"), name="media")
 
 FOOTER_EN = "\n\nI am Kai, Kommu’s support chatbot (beta). Please send your questions one by one. If you’d like a live agent, type LA."
 FOOTER_BM = "\n\nSaya Kai, chatbot sokongan Kommu (beta). Sila hantar soalan anda satu demi satu. Jika anda mahu bercakap dengan ejen manusia, taip LA."
@@ -45,7 +58,7 @@ CAR_KEYWORDS = [
     "byd", "lexus", "kereta", "support", "compatible"
 ]
 
-# ----------------- Utilities -----------------
+# ----------------- Utility Functions -----------------
 def is_office_hours(now=None):
     tz = pytz.timezone(TZ_REGION)
     now = now or datetime.now(tz)
@@ -74,7 +87,6 @@ def extract_year(text: str) -> int | None:
     return int(m.group()) if m else None
 
 def parse_year_range(text: str):
-    """Extracts start & end years from a text like '(2022–2025 AV)'"""
     match = re.search(r"(\d{4})[–-](\d{4})", text)
     if match:
         return int(match.group(1)), int(match.group(2))
@@ -93,6 +105,7 @@ def send_whatsapp_message(to: str, text: str):
             log.error(f"[Kai] Send fail {r.status_code}: {r.text}")
     except Exception as e:
         log.error(f"[Kai] Send error: {e}")
+
 # ----------------- RAG + Memory -----------------
 def run_rag_dual(user_text: str, lang_hint: str = "EN", user_id: str | None = None) -> str:
     sys_prompt = (
@@ -103,7 +116,7 @@ def run_rag_dual(user_text: str, lang_hint: str = "EN", user_id: str | None = No
         "- If user asks in Malay, reply in Malay.\n"
         "- Only include links from context or known sources.\n"
         "- If info not found, politely admit it.\n"
-        "- No emojis. Max 3 links."
+        "- No emojis. Max 5 links."
     )
     lang_instruction = "Jawab dalam BM dengan nada mesra." if lang_hint == "BM" else "Answer politely in English."
 
@@ -176,9 +189,9 @@ try:
 except Exception as e:
     log.error(f"[Startup] Error: {e}")
 
+# ----------------- Scheduler -----------------
 @app.on_event("startup")
 def startup_event():
-    init_db()
     log.info("[Kai] sessions.db initialized")
 
 @repeat_every(seconds=86400)
@@ -189,7 +202,7 @@ def auto_refresh():
     except Exception as e:
         log.error(f"[AutoRefresh] {e}")
 
-# ----------------- Admin Endpoints -----------------
+# ----------------- Admin Endpoint -----------------
 @app.api_route("/admin/reset_memory", methods=["GET","POST"])
 async def admin_reset_memory(request: Request):
     token = request.query_params.get("token") or (await request.form()).get("token") or ""
@@ -199,7 +212,92 @@ async def admin_reset_memory(request: Request):
     reset_memory(user_id)
     log.info(f"[ADMIN] Memory reset for {user_id}")
     return PlainTextResponse("Memory reset completed")
-# ----------------- Webhook POST -----------------
+
+# ----------------- Agent Dashboard API -----------------
+AGENT_TOKENS = {}
+for pair in os.getenv("AGENT_TOKENS", "").split(","):
+    if ":" in pair:
+        token, name = pair.split(":", 1)
+        AGENT_TOKENS[token.strip()] = name.strip()
+
+def verify_agent_token(token: str) -> str | None:
+    return AGENT_TOKENS.get(token)
+
+def list_sessions():
+    conn = sqlite3.connect("sessions.db")
+    cur = conn.cursor()
+    cur.execute("SELECT user_id, data FROM sessions")
+    rows = []
+    for user_id, data in cur.fetchall():
+        try:
+            sess = json.loads(data)
+            hist = sess.get("history", [])
+            last = hist[-1]["text"] if hist else ""
+            rows.append({
+                "user_id": user_id,
+                "lastMessage": last,
+                "frozen": sess.get("frozen", False),
+                "lang": sess.get("lang", "EN")
+            })
+        except Exception:
+            pass
+    conn.close()
+    return rows
+
+def get_chat_history(user_id: str):
+    conn = sqlite3.connect("sessions.db")
+    cur = conn.cursor()
+    cur.execute("SELECT data FROM sessions WHERE user_id=?", (user_id,))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return []
+    sess = json.loads(row[0])
+    hist = sess.get("history", [])
+    return [{"sender": h.get("role", "bot"), "content": h.get("text", "")} for h in hist]
+
+@app.get("/api/agents/me")
+async def get_agent_me(authorization: str = Header("")):
+    token = authorization.replace("Bearer ", "").strip()
+    name = verify_agent_token(token)
+    if not name:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return {"name": name}
+
+@app.get("/api/chats")
+async def get_chats(authorization: str = Header("")):
+    token = authorization.replace("Bearer ", "").strip()
+    if not verify_agent_token(token):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return list_sessions()
+
+@app.get("/api/chat/{user_id}")
+async def get_chat(user_id: str, authorization: str = Header("")):
+    token = authorization.replace("Bearer ", "").strip()
+    if not verify_agent_token(token):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return get_chat_history(user_id)
+
+@app.post("/api/send_message")
+async def send_agent_message(request: Request, authorization: str = Header("")):
+    token = authorization.replace("Bearer ", "").strip()
+    agent = verify_agent_token(token)
+    if not agent:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    data = await request.json()
+    user_id = data.get("user_id")
+    content = data.get("content", "").strip()
+    if not user_id or not content:
+        return JSONResponse({"error": "missing fields"}, status_code=400)
+
+    add_message_to_history(user_id, "agent", content)
+    send_whatsapp_message(user_id, f"{agent}: {content}")
+
+    log.info(f"[Agent:{agent}] → {user_id}: {content}")
+    return {"status": "sent"}
+
+# ----------------- Webhook (Main Entry) -----------------
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
@@ -212,6 +310,11 @@ async def webhook(request: Request):
         wa_from = msg.get("from")
         body = msg.get("text", {}).get("body", "").strip()
         msg_type = msg.get("type", "text")
+
+        # --- Handle media files first ---
+        if handle_incoming_media(msg, wa_from, add_message_to_history):
+            return JSONResponse({"status": "media_received"})
+
         if not body:
             return JSONResponse({"status": "empty"})
 
