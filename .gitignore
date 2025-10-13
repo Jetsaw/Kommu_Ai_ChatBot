@@ -1,4 +1,4 @@
-# Python
+
 __pycache__/
 *.pyc
 *.pyo
@@ -8,18 +8,17 @@ __pycache__/
 env/
 venv/
 
-# OS / IDE
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
 
-# Secrets
+
 .env
 .env.*
 sessions.db
 
-# Build / cache / artifacts
+
 dist/
 build/
 *.log
@@ -28,7 +27,7 @@ tmp/
 .cache/
 pip-wheel-metadata/
 
-# Data & indices
+
 rag/faiss_index/
 rag/website_data.json
 data/**/raw/
@@ -36,11 +35,17 @@ data/**/tmp/
 *.sqlite
 *.db
 
-# Notebooks outputs
+
 .ipynb_checkpoints/
 
-# Node (if any UI later)
-node_modules/
 
-# Docker local
+node_modules/
+kommu-ui/node_modules/
+kommu-ui/dist/
+kommu-ui/.vite/
+kommu-ui/.next/
+kommu-ui/.turbo/
+
+
 *.local.yml
+docker-compose.override.yml
