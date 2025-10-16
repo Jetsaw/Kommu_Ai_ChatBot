@@ -1,15 +1,28 @@
-version: "3.9"
-
 services:
   kai:
     build: .
-    restart: unless-stopped
+    container_name: kai_chatbot-kai
+    restart: always
     ports:
       - "6090:6090"
-    env_file: .env
     environment:
-      - PORT=8000
+      - TZ=Asia/Kuala_Lumpur
+      - META_PHONE_NUMBER_ID=${META_PHONE_NUMBER_ID}
+      - META_PERMANENT_TOKEN=${META_PERMANENT_TOKEN}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      - DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL}
+      - DEEPSEEK_MODEL=${DEEPSEEK_MODEL}
+      - SOP_DOC_URL=${SOP_DOC_URL}
+      - WARRANTY_CSV_URL=${WARRANTY_CSV_URL}
+      - ADMIN_TOKEN=${ADMIN_TOKEN}
+      - AGENT_TOKENS=${AGENT_TOKENS}
     volumes:
+      - ./data:/app/data
       - ./logs:/app/logs
       - ./media:/app/media
-      - ./sessions.db:/app/sessions.db
+    networks:
+      - kai_net
+
+networks:
+  kai_net:
+    driver: bridge
