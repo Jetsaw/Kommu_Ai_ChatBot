@@ -5,38 +5,56 @@ import sqlite3
 from datetime import datetime
 from typing import Optional
 
+# ----------------- Setup -----------------
 log = logging.getLogger(__name__)
 
 META_TOKEN = os.getenv("META_PERMANENT_TOKEN", "")
-MEDIA_CACHE_DIR = "media"
-DB_PATH = os.getenv("DB_PATH", "sessions.db")
 
+# Safe writable directories inside container
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+MEDIA_CACHE_DIR = os.path.join(BASE_DIR, "media")
+os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(MEDIA_CACHE_DIR, exist_ok=True)
 
+# Use dedicated DB file inside /app/data/
+DB_PATH = os.path.join(DATA_DIR, "media_log.db")
+
+
+# ----------------- Database Helpers -----------------
 def _db():
+    """Open a connection to the local media_log SQLite DB."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
+
 def init_media_log():
     """Ensure media_log table exists"""
-    conn = _db()
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS media_log (
-            id TEXT PRIMARY KEY,
-            sender TEXT,
-            type TEXT,
-            caption TEXT,
-            mime_type TEXT,
-            path TEXT,
-            created_at TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
+    try:
+        conn = _db()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS media_log (
+                id TEXT PRIMARY KEY,
+                sender TEXT,
+                type TEXT,
+                caption TEXT,
+                mime_type TEXT,
+                path TEXT,
+                created_at TEXT
+            )
+        """)
+        conn.commit()
+        conn.close()
+        print(f"[MediaLog] media_log.db initialized successfully at {DB_PATH}")
+    except Exception as e:
+        print(f"[MediaLog ERROR] Failed to initialize DB: {e}")
+        raise
+
 
 def insert_media_record(media_id, sender, mtype, caption, mime, path):
+    """Insert or update a media record."""
     conn = _db()
     cur = conn.cursor()
     cur.execute(
@@ -46,6 +64,8 @@ def insert_media_record(media_id, sender, mtype, caption, mime, path):
     conn.commit()
     conn.close()
 
+
+# ----------------- Meta Media Handling -----------------
 def get_media_url(media_id: str) -> Optional[str]:
     """Request temporary download URL from Meta"""
     if not META_TOKEN:
@@ -64,6 +84,7 @@ def get_media_url(media_id: str) -> Optional[str]:
         log.error(f"get_media_url error: {e}")
     return None
 
+
 def guess_extension_from_type(mime_type: str) -> str:
     if "image" in mime_type:
         return ".jpg"
@@ -74,6 +95,7 @@ def guess_extension_from_type(mime_type: str) -> str:
     if "pdf" in mime_type:
         return ".pdf"
     return ".bin"
+
 
 def download_media(media_url: str, media_id: str, ext: str) -> Optional[str]:
     """Download file and return saved path"""
@@ -91,6 +113,7 @@ def download_media(media_url: str, media_id: str, ext: str) -> Optional[str]:
     except Exception as e:
         log.error(f"download_media error: {e}")
         return None
+
 
 def handle_incoming_media(msg: dict, sender_id: str, add_message_to_history):
     """
@@ -117,10 +140,9 @@ def handle_incoming_media(msg: dict, sender_id: str, add_message_to_history):
         add_message_to_history(sender_id, "user", f"[{msg_type.upper()}] (download failed)")
         return True
 
-    
+    # Log in database
     insert_media_record(media_id, sender_id, msg_type, caption, mime, path)
 
-    
     note = f"[{msg_type.upper()}] {caption or mime}\nSaved at: {path}"
     add_message_to_history(sender_id, "user", note)
     log.info(f"Media saved: {path}")
