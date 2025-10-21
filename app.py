@@ -30,23 +30,22 @@ from session_state import (
 )
 from media_handler import handle_incoming_media, init_media_log
 
-# ----------------- Logging -----------------
+
 os.makedirs("logs", exist_ok=True)
 handler = RotatingFileHandler("logs/kai.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8")
 logging.basicConfig(level=logging.INFO, handlers=[handler])
 log = logging.getLogger("kai")
 
-# ----------------- App -----------------
+
 app = FastAPI(title="Kai - Kommu Chatbot")
 
 # Initialize databases
 init_db()
 init_media_log()
 
-# Serve static dashboard + media for admin UI
+# Serve media and dashboard UI
 app.mount("/media", StaticFiles(directory="media"), name="media")
-if os.path.exists("static"):
-    app.mount("/", StaticFiles(directory="static", html=True), name="static")
+app.mount("/ui", StaticFiles(directory="kommu-ui/dist", html=True), name="ui")
 
 FOOTER_EN = "\n\nI am Kai, Kommu’s support chatbot (beta). Please send your questions one by one. If you’d like a live agent, type LA."
 FOOTER_BM = "\n\nSaya Kai, chatbot sokongan Kommu (beta). Sila hantar soalan anda satu demi satu. Jika anda mahu bercakap dengan ejen manusia, taip LA."
@@ -92,7 +91,7 @@ def parse_year_range(text: str):
     if match:
         return int(match.group(1)), int(match.group(2))
     return None, None
-
+# ----------------- WhatsApp Send -----------------
 def send_whatsapp_message(to: str, text: str):
     url = f"https://graph.facebook.com/v17.0/{os.getenv('META_PHONE_NUMBER_ID')}/messages"
     headers = {
@@ -107,7 +106,7 @@ def send_whatsapp_message(to: str, text: str):
     except Exception as e:
         log.error(f"[Kai] Send error: {e}")
 
-# ----------------- RAG + Memory -----------------
+# ----------------- RAG Dual Engine -----------------
 def run_rag_dual(user_text: str, lang_hint: str = "EN", user_id: str | None = None) -> str:
     sys_prompt = (
         "You are Kai, Kommu’s polite and professional support assistant.\n"
@@ -128,7 +127,6 @@ def run_rag_dual(user_text: str, lang_hint: str = "EN", user_id: str | None = No
             limited = history[-MEMORY_LAYERS:]
             history_text = "\n".join([f"{h['role']}: {h['text']}" for h in limited])
 
-    # SOP RAG
     context = rag_sop.build_context(user_text, topk=4) if rag_sop else ""
     if context.strip():
         prompt = f"{history_text}\nUser: {user_text}\n\nContext:\n{context}\n\n{lang_instruction}"
@@ -141,7 +139,6 @@ def run_rag_dual(user_text: str, lang_hint: str = "EN", user_id: str | None = No
                 log.warning(f"[Translate] BM translation failed: {e}")
             return llm.strip()
 
-    # Website RAG
     context = rag_web.build_context(user_text, topk=4) if rag_web else ""
     if context.strip():
         prompt = f"{history_text}\nUser: {user_text}\n\nContext:\n{context}\n\n{lang_instruction}"
@@ -154,9 +151,9 @@ def run_rag_dual(user_text: str, lang_hint: str = "EN", user_id: str | None = No
                 log.warning(f"[Translate] BM translation failed: {e}")
             return llm.strip()
     return ""
-# ----------------- RAG Load -----------------
+
+# ----------------- RAG Loader -----------------
 def load_rag():
-    """Load both SOP and Website FAISS vector indices."""
     global rag_sop, rag_web
     try:
         rag_sop = RAGEngine(k=4, base_dir=os.path.join(RAG_DIR, "faiss_index"))
@@ -164,7 +161,6 @@ def load_rag():
     except Exception as e:
         log.info(f"[Kai] SOP RAG not available: {e}")
         rag_sop = None
-
     try:
         rag_web = RAGEngine(k=4, base_dir=os.path.join(RAG_DIR, "faiss_index_web"))
         log.info("[Kai] Website RAG loaded")
@@ -172,8 +168,6 @@ def load_rag():
         log.info(f"[Kai] Website RAG not available: {e}")
         rag_web = None
 
-
-# ----------------- Initialize RAG + SOP Loader -----------------
 rag_sop, rag_web = None, None
 try:
     if SOP_DOC_URL:
@@ -188,45 +182,32 @@ try:
             log.info(f"[Startup] Loaded {len(qas)} SOP QAs")
     else:
         load_rag()
-
     fetch_warranty_all()
 except Exception as e:
     log.error(f"[Startup] Error: {e}")
-
 
 # ----------------- Scheduler -----------------
 @app.on_event("startup")
 def startup_event():
     log.info("[Kai] sessions.db initialized")
 
-
 @repeat_every(seconds=86400)
 def auto_refresh():
-    """Refresh warranty data every 24 hours."""
     try:
         fetch_warranty_all()
-        log.info("[AutoRefresh] Warranty refreshed successfully")
+        log.info("[AutoRefresh] Warranty refreshed")
     except Exception as e:
-        log.error(f"[AutoRefresh] Error: {e}")
-
-
+        log.error(f"[AutoRefresh] {e}")
 # ----------------- Admin Endpoint -----------------
 @app.api_route("/admin/reset_memory", methods=["GET", "POST"])
 async def admin_reset_memory(request: Request):
-    """
-    Reset chatbot memory for a specific user or all users.
-    Example:
-      GET /admin/reset_memory?token=<ADMIN_TOKEN>&user_id=<wa_number>
-    """
     token = request.query_params.get("token") or (await request.form()).get("token") or ""
     user_id = request.query_params.get("user_id") or (await request.form()).get("user_id")
-
     if token != ADMIN_TOKEN:
         return PlainTextResponse("Forbidden", 403)
-
     reset_memory(user_id)
-    log.info(f"[ADMIN] Memory reset for {user_id or 'ALL USERS'}")
-    return PlainTextResponse("Memory reset completed successfully")
+    log.info(f"[ADMIN] Memory reset for {user_id or 'ALL'}")
+    return PlainTextResponse("Memory reset completed")
 
 
 # ----------------- Agent Dashboard API -----------------
@@ -236,14 +217,10 @@ for pair in os.getenv("AGENT_TOKENS", "").split(","):
         token, name = pair.split(":", 1)
         AGENT_TOKENS[token.strip()] = name.strip()
 
-
 def verify_agent_token(token: str) -> str | None:
-    """Return agent name if token is valid."""
     return AGENT_TOKENS.get(token)
 
-
 def list_sessions():
-    """List all active WhatsApp sessions with summary info."""
     conn = sqlite3.connect("sessions.db")
     cur = conn.cursor()
     cur.execute("SELECT user_id, data FROM sessions")
@@ -257,16 +234,14 @@ def list_sessions():
                 "user_id": user_id,
                 "lastMessage": last,
                 "frozen": sess.get("frozen", False),
-                "lang": sess.get("lang", "EN"),
+                "lang": sess.get("lang", "EN")
             })
         except Exception:
             pass
     conn.close()
     return rows
 
-
 def get_chat_history(user_id: str):
-    """Return full chat history for a specific WhatsApp user."""
     conn = sqlite3.connect("sessions.db")
     cur = conn.cursor()
     cur.execute("SELECT data FROM sessions WHERE user_id=?", (user_id,))
@@ -278,8 +253,6 @@ def get_chat_history(user_id: str):
     hist = sess.get("history", [])
     return [{"sender": h.get("role", "bot"), "content": h.get("text", "")} for h in hist]
 
-
-# ----------------- Agent Auth + Chat APIs -----------------
 @app.get("/api/agents/me")
 async def get_agent_me(authorization: str = Header("")):
     token = authorization.replace("Bearer ", "").strip()
@@ -288,14 +261,12 @@ async def get_agent_me(authorization: str = Header("")):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     return {"name": name}
 
-
 @app.get("/api/chats")
 async def get_chats(authorization: str = Header("")):
     token = authorization.replace("Bearer ", "").strip()
     if not verify_agent_token(token):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     return list_sessions()
-
 
 @app.get("/api/chat/{user_id}")
 async def get_chat(user_id: str, authorization: str = Header("")):
@@ -304,10 +275,8 @@ async def get_chat(user_id: str, authorization: str = Header("")):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     return get_chat_history(user_id)
 
-
 @app.post("/api/send_message")
 async def send_agent_message(request: Request, authorization: str = Header("")):
-    """Allow authorized agent to reply to WhatsApp users."""
     token = authorization.replace("Bearer ", "").strip()
     agent = verify_agent_token(token)
     if not agent:
@@ -321,15 +290,14 @@ async def send_agent_message(request: Request, authorization: str = Header("")):
 
     add_message_to_history(user_id, "agent", content)
     send_whatsapp_message(user_id, f"{agent}: {content}")
+
     log.info(f"[Agent:{agent}] → {user_id}: {content}")
     return {"status": "sent"}
-# ----------------- Webhook (Main Entry Point) -----------------
+
+
+# ----------------- Webhook (Main WhatsApp Entry) -----------------
 @app.post("/webhook")
 async def webhook(request: Request):
-    """
-    Main WhatsApp Cloud API webhook handler.
-    Handles text, media, warranty lookup, car support, and fallback Q&A.
-    """
     try:
         data = await request.json()
         value = data.get("entry", [{}])[0].get("changes", [{}])[0].get("value", {})
@@ -341,7 +309,7 @@ async def webhook(request: Request):
         body = msg.get("text", {}).get("body", "").strip()
         msg_type = msg.get("type", "text")
 
-        # --- Handle media messages first ---
+        # --- Handle media ---
         if handle_incoming_media(msg, wa_from, add_message_to_history):
             return JSONResponse({"status": "media_received"})
 
@@ -357,55 +325,42 @@ async def webhook(request: Request):
         aft = not is_office_hours()
         add_message_to_history(wa_from, "user", body)
 
-        # -------- Greeting --------
-        if not sess.get("greeted") and has_any(["hi", "hello", "hai", "helo", "mula", "start", "menu"], lower):
-            msg_out = (
-                "Hi! I'm Kai – Kommu Chatbot. This chat is handled by a chatbot (beta)."
-                if lang == "EN"
-                else "Hai! Saya Kai – Chatbot Kommu. Perbualan ini dikendalikan oleh chatbot (beta)."
-            )
-            if aft:
-                msg_out += after_hours_suffix(lang)
+        # --- Greeting ---
+        if not sess.get("greeted") and has_any(["hi","hello","hai","helo","start","menu"], lower):
+            msg_out = ("Hi! I'm Kai – Kommu Chatbot. This chat is handled by a chatbot (beta)."
+                       if lang=="EN" else
+                       "Hai! Saya Kai – Chatbot Kommu. Perbualan ini dikendalikan oleh chatbot (beta).")
+            if aft: msg_out += after_hours_suffix(lang)
             sess["greeted"] = True
             send_whatsapp_message(wa_from, add_footer(msg_out, lang))
             add_message_to_history(wa_from, "bot", msg_out)
             return JSONResponse({"status": "greeted"})
 
-        # -------- Live Agent Handling --------
+        # --- Live Agent Handling ---
         if sess.get("frozen"):
-            if lower in {"resume", "unfreeze", "sambung"}:
+            if lower in {"resume","unfreeze","sambung"}:
                 freeze(wa_from, False, mode="user")
-                msg_out = (
-                    "Bot resumed. How can I help?"
-                    if lang == "EN"
-                    else "Bot disambung semula. Ada apa saya boleh bantu?"
-                )
+                msg_out = "Bot resumed. How can I help?" if lang=="EN" else "Bot disambung semula. Ada apa saya boleh bantu?"
                 send_whatsapp_message(wa_from, add_footer(msg_out, lang))
                 return JSONResponse({"status": "resumed"})
-            msg_out = (
-                "A live agent will assist you soon. Type *resume* to continue with the bot."
-                if lang == "EN"
-                else "Ejen manusia akan membantu anda. Taip *resume* untuk teruskan."
-            )
+            msg_out = ("A live agent will assist you soon. Type *resume* to continue with the bot."
+                       if lang=="EN" else
+                       "Ejen manusia akan membantu anda. Taip *resume* untuk teruskan.")
             send_whatsapp_message(wa_from, add_footer(msg_out, lang))
             return JSONResponse({"status": "frozen"})
 
-        # -------- Warranty Lookup --------
+        # --- Warranty Lookup ---
         if 6 <= len(body) <= 20:
             row = warranty_lookup_by_dongle(body)
             if row:
-                msg_out = (
-                    f"Warranty status: {warranty_text_from_row(row)}"
-                    if lang == "EN"
-                    else f"Status waranti: {warranty_text_from_row(row)}"
-                )
-                if aft:
-                    msg_out += after_hours_suffix(lang)
+                msg_out = (f"Warranty status: {warranty_text_from_row(row)}"
+                           if lang=="EN" else
+                           f"Status waranti: {warranty_text_from_row(row)}")
+                if aft: msg_out += after_hours_suffix(lang)
                 send_whatsapp_message(wa_from, add_footer(msg_out, lang))
-                add_message_to_history(wa_from, "bot", msg_out)
                 return JSONResponse({"status": "warranty"})
 
-        # -------- Car Support Logic --------
+        # --- Car Support Logic ---
         if detect_car_support_query(body):
             answer = run_rag_dual(body, lang_hint=lang, user_id=wa_from)
             lower_ans = answer.lower() if answer else ""
@@ -416,11 +371,9 @@ async def webhook(request: Request):
                 if sop_years != (None, None) and year_in_text:
                     start, end = sop_years
                     if year_in_text < start or year_in_text > end:
-                        msg_out = (
-                            f"Sorry, the {year_in_text} model is not supported. KommuAssist supports {start}–{end} variants only."
-                            if lang == "EN"
-                            else f"Maaf, model tahun {year_in_text} tidak disokong. KommuAssist hanya menyokong varian {start}–{end} sahaja."
-                        )
+                        msg_out = (f"Sorry, the {year_in_text} model is not supported. KommuAssist supports {start}–{end} variants only."
+                                   if lang=="EN" else
+                                   f"Maaf, model tahun {year_in_text} tidak disokong. KommuAssist hanya menyokong varian {start}–{end} sahaja.")
                         send_whatsapp_message(wa_from, add_footer(msg_out, lang))
                         add_message_to_history(wa_from, "bot", msg_out)
                         return JSONResponse({"status": "car_year_not_supported"})
@@ -429,33 +382,27 @@ async def webhook(request: Request):
                 add_message_to_history(wa_from, "bot", answer)
                 return JSONResponse({"status": "car_supported_from_sop"})
 
-            msg_out = (
-                "I'm not sure about that car. Does it have Adaptive Cruise Control (ACC) and Lane Keep Assist (LKA)?"
-                if lang == "EN"
-                else "Saya tidak pasti tentang kereta itu. Adakah ia mempunyai sistem Adaptive Cruise Control (ACC) dan Lane Keep Assist (LKA)?"
-            )
+            msg_out = ("I'm not sure about that car. Does it have Adaptive Cruise Control (ACC) and Lane Keep Assist (LKA)?"
+                       if lang=="EN"
+                       else "Saya tidak pasti tentang kereta itu. Adakah ia mempunyai sistem Adaptive Cruise Control (ACC) dan Lane Keep Assist (LKA)?")
             set_last_intent(wa_from, "car_unknown")
             send_whatsapp_message(wa_from, add_footer(msg_out, lang))
             add_message_to_history(wa_from, "bot", msg_out)
             return JSONResponse({"status": "car_unknown"})
 
-        # -------- Fallback (General Knowledge / SOP) --------
+        # --- Fallback RAG ---
         answer = run_rag_dual(body, lang_hint=lang, user_id=wa_from)
         if answer:
-            if aft:
-                answer += after_hours_suffix(lang)
+            if aft: answer += after_hours_suffix(lang)
             send_whatsapp_message(wa_from, add_footer(answer, lang))
             add_message_to_history(wa_from, "bot", answer)
             return JSONResponse({"status": "answered"})
 
-        # -------- Generic Fallback --------
-        msg_out = (
-            "I can help with pricing, installation, office hours, warranty, and test drives."
-            if lang == "EN"
-            else "Saya boleh bantu dengan harga, pemasangan, waktu pejabat, waranti, dan pandu uji."
-        )
-        if aft:
-            msg_out += after_hours_suffix(lang)
+        # --- Default fallback ---
+        msg_out = ("I can help with pricing, installation, office hours, warranty, and test drives."
+                   if lang=="EN" else
+                   "Saya boleh bantu dengan harga, pemasangan, waktu pejabat, waranti, dan pandu uji.")
+        if aft: msg_out += after_hours_suffix(lang)
         send_whatsapp_message(wa_from, add_footer(msg_out, lang))
         add_message_to_history(wa_from, "bot", msg_out)
         return JSONResponse({"status": "fallback"})
@@ -463,21 +410,9 @@ async def webhook(request: Request):
     except Exception as e:
         log.error(f"[Kai] ERR webhook: {e}\n{traceback.format_exc()}")
         try:
-            send_whatsapp_message(wa_from, "Sorry, I encountered an issue. Please try again later.")
+            send_whatsapp_message(wa_from, "Sorry, I encountered an issue. Please try again.")
         except Exception:
             pass
         return JSONResponse({"status": "error", "error": str(e)})
 
 
-# ----------------- Root Health Check -----------------
-@app.get("/health")
-async def health_check():
-    """Simple API health endpoint for UI and monitoring."""
-    return {"status": "ok", "time": datetime.now().isoformat()}
-
-
-# ----------------- Entry Point -----------------
-if __name__ == "__main__":
-    import uvicorn
-    log.info("[Kai] Starting server...")
-    uvicorn.run("app:app", host="0.0.0.0", port=int(PORT), reload=False)
