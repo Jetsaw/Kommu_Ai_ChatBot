@@ -38,7 +38,7 @@ data/**/tmp/
 
 .ipynb_checkpoints/
 
-
+!kommu-ui/package-lock.json
 node_modules/
 kommu-ui/node_modules/
 kommu-ui/dist/

@@ -1,12 +1,8 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-
-const isDocker = process.env.DOCKER_ENV === 'true'
-
-
 export default defineConfig({
-  base: isDocker ? './' : '/ui/',
+  base: '/ui/',
   plugins: [react()],
   build: {
     sourcemap: false,

@@ -46,6 +46,7 @@ init_media_log()
 # Serve media and dashboard UI
 app.mount("/media", StaticFiles(directory="media"), name="media")
 app.mount("/ui", StaticFiles(directory="kommu-ui/dist", html=True), name="ui")
+app.mount("/ui/assets", StaticFiles(directory="kommu-ui/dist/assets"), name="ui-assets")
 
 FOOTER_EN = "\n\nI am Kai, Kommu’s support chatbot (beta). Please send your questions one by one. If you’d like a live agent, type LA."
 FOOTER_BM = "\n\nSaya Kai, chatbot sokongan Kommu (beta). Sila hantar soalan anda satu demi satu. Jika anda mahu bercakap dengan ejen manusia, taip LA."
@@ -295,7 +296,7 @@ async def send_agent_message(request: Request, authorization: str = Header("")):
     return {"status": "sent"}
 
 
-# ----------------- Webhook (Main WhatsApp Entry) -----------------
+# ----------------- Webhook -----------------
 @app.post("/webhook")
 async def webhook(request: Request):
     try:

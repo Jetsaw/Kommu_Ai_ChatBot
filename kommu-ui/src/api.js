@@ -1,23 +1,23 @@
 import axios from "axios";
 
-const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:6090";
+const BASE_URL = "/api";
 
 export async function getAgentMe(token) {
-  const res = await axios.get(`${API_BASE}/api/agents/me`, {
+  const res = await axios.get(`${BASE_URL}/agents/me`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   return res.data;
 }
 
 export async function getChats(token) {
-  const res = await axios.get(`${API_BASE}/api/chats`, {
+  const res = await axios.get(`${BASE_URL}/chats`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   return res.data;
 }
 
 export async function getChat(token, userId) {
-  const res = await axios.get(`${API_BASE}/api/chat/${userId}`, {
+  const res = await axios.get(`${BASE_URL}/chat/${userId}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   return res.data;
@@ -25,7 +25,7 @@ export async function getChat(token, userId) {
 
 export async function sendMessage(token, userId, content) {
   const res = await axios.post(
-    `${API_BASE}/api/send_message`,
+    `${BASE_URL}/send_message`,
     { user_id: userId, content },
     { headers: { Authorization: `Bearer ${token}` } }
   );
