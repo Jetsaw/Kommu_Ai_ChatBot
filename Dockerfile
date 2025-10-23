@@ -1,9 +1,9 @@
-
 FROM node:22-alpine AS frontend-builder
 WORKDIR /app/kommu-ui
 COPY kommu-ui/package*.json ./
 RUN npm install
 COPY kommu-ui/ .
+ENV DOCKER_ENV=true
 RUN npm run build
 
 
