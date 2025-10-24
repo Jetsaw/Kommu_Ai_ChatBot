@@ -254,7 +254,8 @@ def get_chat_history(user_id: str):
     hist = sess.get("history", [])
     return [{"sender": h.get("role", "bot"), "content": h.get("text", "")} for h in hist]
 
-@app.get("/api/agents/me")
+
+@app.get("/api/agent/me")
 async def get_agent_me(authorization: str = Header("")):
     token = authorization.replace("Bearer ", "").strip()
     name = verify_agent_token(token)
@@ -289,11 +290,14 @@ async def send_agent_message(request: Request, authorization: str = Header("")):
     if not user_id or not content:
         return JSONResponse({"error": "missing fields"}, status_code=400)
 
+    # Log the message and forward via WhatsApp if needed
+    from media_handler import send_whatsapp_message
     add_message_to_history(user_id, "agent", content)
     send_whatsapp_message(user_id, f"{agent}: {content}")
 
     log.info(f"[Agent:{agent}] → {user_id}: {content}")
     return {"status": "sent"}
+
 
 
 # ----------------- Webhook -----------------
