@@ -1,4 +1,3 @@
-
 __pycache__/
 *.pyc
 *.pyo
@@ -7,20 +6,10 @@ __pycache__/
 .venv/
 env/
 venv/
-
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
-
-
-.env
-.env.*
-sessions.db
-
-
-dist/
-build/
 *.log
 logs/
 tmp/
@@ -28,24 +17,37 @@ tmp/
 pip-wheel-metadata/
 
 
-rag/faiss_index/
-rag/website_data.json
 data/**/raw/
 data/**/tmp/
 *.sqlite
 *.db
+sessions.db
+
+
+rag/faiss_index/
+rag/website_data.json
 
 
 .ipynb_checkpoints/
 
-!kommu-ui/package-lock.json
+
+.env
+.env.*
+
+
 node_modules/
 kommu-ui/node_modules/
-kommu-ui/dist/
 kommu-ui/.vite/
 kommu-ui/.next/
 kommu-ui/.turbo/
+kommu-ui/dist/
 
-
+!kommu-ui/package.json
+!kommu-ui/package-lock.json
+!kommu-ui/vite.config.mjs
+!kommu-ui/postcss.config.js
+!kommu-ui/tailwind.config.js
+!kommu-ui/index.html
+!kommu-ui/src/**
 *.local.yml
 docker-compose.override.yml
