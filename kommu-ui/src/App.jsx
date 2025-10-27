@@ -2,9 +2,15 @@ import React, { useEffect, useState } from "react";
 import { getAgentMe, getChats, getChat, sendMessage } from "./api";
 import ChatList from "./components/ChatList";
 import ChatWindow from "./components/ChatWindow";
+import {
+  readStoredToken,
+  writeStoredToken,
+  clearStoredToken,
+} from "./utils/tokenStorage";
 
 export default function App() {
-  const [token, setToken] = useState(localStorage.getItem("agentToken") || "");
+  
+  const [token, setToken] = useState(readStoredToken());
   const [agent, setAgent] = useState(null);
   const [chats, setChats] = useState([]);
   const [selected, setSelected] = useState(null);
@@ -16,49 +22,68 @@ export default function App() {
 
   // ---------------- Agent Auth ----------------
   useEffect(() => {
+    if (!token) {
+      const stored = readStoredToken();
+      if (stored) {
+        setToken(stored);
+        return;
+      }
+    }
     if (token) {
-      console.log("🔍 Checking agent token:", token);
-      setStatus("🔄 Connecting to /api/agent/me ...");
+      
+      console.log("Checking agent token:", token);
+      setStatus("Connecting to /api/agent/me ...");
       getAgentMe(token)
         .then((data) => {
-          console.log("✅ Agent verified:", data);
-          setStatus("✅ Agent verified");
+          
+          console.log("Agent verified:", data);
+          setStatus("Agent verified");
           setAgent(data.name);
           setError("");
           loadChats();
         })
         .catch((err) => {
-          console.error("❌ Login error:", err);
+          
+          console.error("Login error:", err);
           setAgent(null);
-          setError(`❌ Login failed: ${err.message || "unknown error"}`);
-          setStatus("❌ Unauthorized or server error");
-          localStorage.removeItem("agentToken");
+          
+          setError(`Login failed: ${err.message || "unknown error"}`);
+          setStatus("Unauthorized or server error");
+          clearStoredToken();
         });
     }
   }, [token]);
 
   async function loadChats() {
     try {
-      setStatus("📡 Loading chats...");
-      const data = await getChats(token);
+      
+      const activeToken = token || readStoredToken();
+      setStatus("Loading chats...");
+      const data = await getChats(activeToken);
       setChats(data);
-      setStatus("✅ Chats loaded");
+      
+      setStatus("Chats loaded");
     } catch (err) {
-      console.error("❌ Failed to load chats:", err);
-      setStatus(`❌ Error loading chats: ${err.message}`);
+      
+      console.error("Failed to load chats:", err);
+      setStatus(`Error loading chats: ${err.message}`);
     }
   }
 
   async function loadChat(userId) {
     try {
-      setStatus(`📥 Loading chat history for ${userId}...`);
-      const data = await getChat(token, userId);
+      
+      const activeToken = token || readStoredToken();
+      setStatus(`Loading chat history for ${userId}...`);
+      const data = await getChat(activeToken, userId);
       setSelected(userId);
       setMessages(data);
-      setStatus("✅ Chat loaded");
+     
+      setStatus("Chat loaded");
     } catch (err) {
-      console.error("❌ Failed to load chat:", err);
-      setStatus(`❌ Error loading chat: ${err.message}`);
+      
+      console.error("Failed to load chat:", err);
+      setStatus(`Error loading chat: ${err.message}`);
     }
   }
 
@@ -66,13 +91,17 @@ export default function App() {
     if (!content.trim()) return;
     setLoading(true);
     try {
-      await sendMessage(token, selected, content);
+      
+      const activeToken = token || readStoredToken();
+      await sendMessage(activeToken, selected, content);
       setContent("");
       await loadChat(selected);
-      setStatus("✅ Message sent");
+      
+      setStatus("Message sent");
     } catch (err) {
       console.error(err);
-      setStatus(`❌ Failed to send: ${err.message}`);
+      
+      setStatus(`Failed to send: ${err.message}`);
       alert("Failed to send message");
     } finally {
       setLoading(false);
@@ -85,27 +114,36 @@ export default function App() {
       return;
     }
 
-    console.log("🧠 Attempting login with token:", token);
-    setStatus("🔄 Verifying token...");
+    
+    console.log("Attempting login with token:", token);
+    setStatus("Verifying token...");
     try {
-      const res = await getAgentMe(token);
-      console.log("✅ Login success:", res);
-      localStorage.setItem("agentToken", token);
+      
+      const normalized = token.trim();
+      const res = await getAgentMe(normalized);
+      console.log("Login success:", res);
+      const stored = writeStoredToken(normalized);
+      setToken(stored);
       setAgent(res.name);
-      setStatus("✅ Login successful");
+      
+      setStatus("Login successful");
       window.location.reload();
     } catch (err) {
-      console.error("❌ Login failed:", err);
-      setError(`❌ Invalid token: ${err.message}`);
-      setStatus("❌ Invalid or unauthorized");
+      
+      console.error("Login failed:", err);
+      setError(`Invalid token: ${err.message}`);
+      setStatus("Invalid or unauthorized");
+      clearStoredToken();
     }
   }
 
   function handleLogout() {
-    localStorage.removeItem("agentToken");
+    
+    clearStoredToken();
     setToken("");
     setAgent(null);
-    setStatus("🚪 Logged out");
+    
+    setStatus("Logged out");
   }
 
   // Auto-refresh chat list every 10 seconds
@@ -145,7 +183,8 @@ export default function App() {
         )}
 
         <p className="text-gray-500 text-sm mt-4">
-          💡 Tip: Use Agent35 or Agent34 from your .env file
+          
+          Tip: Use Agent35 or Agent34 from your .env file
         </p>
       </div>
     );
@@ -156,7 +195,8 @@ export default function App() {
     <div className="flex flex-col h-screen bg-gray-50">
       {/* Top Bar */}
       <div className="bg-kommu-blue text-white flex justify-between items-center px-6 py-3 shadow">
-        <h2 className="font-semibold">👤 Logged in as {agent}</h2>
+        
+        <h2 className="font-semibold">Logged in as {agent}</h2>
         <button
           onClick={handleLogout}
           className="bg-white text-kommu-blue px-3 py-1 rounded hover:bg-gray-100"
@@ -182,11 +222,3 @@ export default function App() {
           messages={messages}
           selected={selected}
           content={content}
-          onChange={setContent}
-          onSend={handleSend}
-          loading={loading}
-        />
-      </div>
-    </div>
-  );
-}

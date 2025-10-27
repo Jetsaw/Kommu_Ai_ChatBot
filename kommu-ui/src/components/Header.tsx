@@ -1,7 +1,12 @@
 import React from "react";
+import { clearStoredToken } from "../utils/tokenStorage";
 
 export default function HeaderBar() {
-  const logout = () => { localStorage.removeItem("agent_token"); window.location.reload(); };
+  
+  const logout = () => {
+    clearStoredToken();
+    window.location.reload();
+  };
   return (
     <div className="h-12 flex items-center justify-between px-4 border-b border-slate-800 bg-slate-900/60">
       <div className="font-semibold">Kommu CS</div>

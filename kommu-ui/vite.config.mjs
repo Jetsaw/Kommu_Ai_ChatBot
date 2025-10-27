@@ -1,16 +1,29 @@
-import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+import path from 'path';
 
 export default defineConfig({
-  base: '/ui/',
+  base: '/ui/', 
   plugins: [react()],
   build: {
-    sourcemap: false,
     outDir: 'dist',
-    emptyOutDir: true
+    assetsDir: 'assets',
+    sourcemap: false,
+    manifest: true,
+    rollupOptions: {
+      input: path.resolve(__dirname, 'index.html'),
+      output: {
+        assetFileNames: 'assets/[name]-[hash][extname]',
+        chunkFileNames: 'assets/[name]-[hash].js',
+        entryFileNames: 'assets/[name]-[hash].js',
+      },
+    },
   },
   server: {
-    host: '0.0.0.0',
-    port: 5173
-  }
-})
+    port: 5173,
+    strictPort: true,
+    hmr: {
+      overlay: true,
+    },
+  },
+});

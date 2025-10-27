@@ -1,19 +1,32 @@
 import React, { useState } from "react";
 import { me } from "../api/backend";
+import {
+  readStoredToken,
+  writeStoredToken,
+  clearStoredToken,
+} from "../utils/tokenStorage";
 
 export default function Login() {
-  const [token, setToken] = useState("");
+  
+  const [token, setToken] = useState(readStoredToken());
   const [loading, setLoading] = useState(false);
 
   const onLogin = async () => {
+    const normalized = token.trim();
+    if (!normalized) {
+      alert("Enter a valid token");
+      return;
+    }
     setLoading(true);
     try {
-      localStorage.setItem("agent_token", token.trim());
+      
+      writeStoredToken(normalized);
       await me();
       window.location.reload();
     } catch {
       alert("Invalid token");
-      localStorage.removeItem("agent_token");
+      
+      clearStoredToken();
     } finally {
       setLoading(false);
     }
@@ -35,7 +48,8 @@ export default function Login() {
           disabled={loading}
           className="w-full py-2 rounded bg-blue-600 hover:bg-blue-500 font-semibold disabled:opacity-50"
         >
-          {loading ? "Checking…" : "Login"}
+          
+          {loading ? "Checking..." : "Login"}
         </button>
       </div>
     </div>

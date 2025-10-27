@@ -5,7 +5,7 @@ function TestAPI() {
 
   useEffect(() => {
   
-    const BASE_URL = import.meta.env.VITE_API_BASE;
+    const BASE_URL = import.meta.env.VITE_API_BASE || "/api";
 
 
     fetch(`${BASE_URL}/health`)
