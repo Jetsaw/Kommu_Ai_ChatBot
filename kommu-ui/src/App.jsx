@@ -10,7 +10,10 @@ import {
 
 export default function App() {
   
-  const [token, setToken] = useState(readStoredToken());
+ 
+
+  const [token, setToken] = useState(() => readStoredToken());
+  const [tokenInput, setTokenInput] = useState(() => readStoredToken() || "");
   const [agent, setAgent] = useState(null);
   const [chats, setChats] = useState([]);
   const [selected, setSelected] = useState(null);
@@ -23,35 +26,31 @@ export default function App() {
   // ---------------- Agent Auth ----------------
   useEffect(() => {
     if (!token) {
-      const stored = readStoredToken();
-      if (stored) {
-        setToken(stored);
-        return;
-      }
-    }
-    if (token) {
       
-      console.log("Checking agent token:", token);
-      setStatus("Connecting to /api/agent/me ...");
-      getAgentMe(token)
-        .then((data) => {
-          
-          console.log("Agent verified:", data);
-          setStatus("Agent verified");
-          setAgent(data.name);
-          setError("");
-          loadChats();
-        })
-        .catch((err) => {
-          
-          console.error("Login error:", err);
-          setAgent(null);
-          
-          setError(`Login failed: ${err.message || "unknown error"}`);
-          setStatus("Unauthorized or server error");
-          clearStoredToken();
-        });
+      return;
     }
+
+    console.log("Checking agent token:", token);
+    setStatus("Connecting to /api/agent/me ...");
+    getAgentMe(token)
+      .then((data) => {
+
+        console.log("Agent verified:", data);
+        setStatus("Agent verified");
+        setAgent(data.name);
+        setError("");
+        loadChats();
+      })
+      .catch((err) => {
+
+        console.error("Login error:", err);
+        setAgent(null);
+
+        setError(`Login failed: ${err.message || "unknown error"}`);
+        setStatus("Unauthorized or server error");
+        clearStoredToken();
+        setToken("");
+      });
   }, [token]);
 
   async function loadChats() {
@@ -77,13 +76,7 @@ export default function App() {
       setStatus(`Loading chat history for ${userId}...`);
       const data = await getChat(activeToken, userId);
       setSelected(userId);
-      setMessages(data);
-     
-      setStatus("Chat loaded");
-    } catch (err) {
-      
-      console.error("Failed to load chat:", err);
-      setStatus(`Error loading chat: ${err.message}`);
+@@ -87,107 +83,109 @@ export default function App() {
     }
   }
 
@@ -109,40 +102,50 @@ export default function App() {
   }
 
   async function handleLogin() {
-    if (!token.trim()) {
+    
+    if (!tokenInput.trim()) {
       alert("Enter a valid agent token");
       return;
     }
 
     
-    console.log("Attempting login with token:", token);
+    
+    console.log("Attempting login with token:", tokenInput);
     setStatus("Verifying token...");
     try {
       
-      const normalized = token.trim();
+
+      const normalized = tokenInput.trim();
       const res = await getAgentMe(normalized);
       console.log("Login success:", res);
       const stored = writeStoredToken(normalized);
       setToken(stored);
+      setTokenInput(stored);
       setAgent(res.name);
       
+
       setStatus("Login successful");
       window.location.reload();
     } catch (err) {
       
+
       console.error("Login failed:", err);
       setError(`Invalid token: ${err.message}`);
       setStatus("Invalid or unauthorized");
       clearStoredToken();
+      setAgent(null);
     }
   }
 
   function handleLogout() {
     
+
     clearStoredToken();
     setToken("");
+    setTokenInput("");
     setAgent(null);
     
+
     setStatus("Logged out");
   }
 
@@ -164,8 +167,9 @@ export default function App() {
         <input
           type="text"
           placeholder="Enter Agent Token"
-          value={token}
-          onChange={(e) => setToken(e.target.value)}
+          
+          value={tokenInput}
+          onChange={(e) => setTokenInput(e.target.value)}
           className="border border-gray-400 rounded p-2 w-64 mb-2"
         />
         <button
@@ -191,11 +195,7 @@ export default function App() {
   }
 
   // ---------------- Chat Dashboard ----------------
-  return (
-    <div className="flex flex-col h-screen bg-gray-50">
-      {/* Top Bar */}
-      <div className="bg-kommu-blue text-white flex justify-between items-center px-6 py-3 shadow">
-        
+@@ -199,26 +197,34 @@ export default function App() {
         <h2 className="font-semibold">Logged in as {agent}</h2>
         <button
           onClick={handleLogout}
@@ -221,4 +221,13 @@ export default function App() {
         <ChatWindow
           messages={messages}
           selected={selected}
+          
           content={content}
+          onChange={setContent}
+          onSend={handleSend}
+          loading={loading}
+        />
+      </div>
+    </div>
+  );
+}
