@@ -1,49 +1,43 @@
-import { readStoredToken } from "../utils/tokenStorage";
+import axios from "axios";
+import { getToken } from "../utils/tokenStorage";
 
-const BASE_URL = import.meta.env.VITE_API_BASE ?? "/api";
+const BASE_URL = import.meta.env.VITE_API_BASE || "/api";
 
-function requireToken(): string {
-  const token = readStoredToken().trim();
-  if (!token) {
-    throw new Error("Missing agent token");
-  }
-  return token;
+function authHeaders(token?: string) {
+  const t = token || getToken();
+  return { Authorization: `Bearer ${t}` };
 }
 
-function authHeaders() {
-  
-  const t = requireToken();
-  return { Authorization: `Bearer ${t}`, "Content-Type": "application/json" };
-}
-
-export async function me() {
-  
-  const r = await fetch(`${BASE_URL}/agent/me`, { headers: authHeaders() });
-  if (!r.ok) throw new Error("Auth failed");
-  return r.json();
-}
-
-export async function getChats() {
-  
-  const r = await fetch(`${BASE_URL}/chats`, { headers: authHeaders() });
-  return r.json();
-}
-
-export async function getChat(user_id: string) {
-  
-  const r = await fetch(`${BASE_URL}/chat/${encodeURIComponent(user_id)}`, {
-    headers: authHeaders(),
+export async function getAgentMe(token?: string) {
+  const res = await axios.get(`${BASE_URL}/agent/me`, {
+    headers: authHeaders(token),
   });
-  return r.json();
+  return res.data;
 }
 
-export async function sendMessage(user_id: string, content: string) {
-  
-  const r = await fetch(`${BASE_URL}/send_message`, {
-    method: "POST",
-    headers: authHeaders(),
-    body: JSON.stringify({ user_id, content }),
+export async function getChats(token?: string) {
+  const res = await axios.get(`${BASE_URL}/chats`, {
+    headers: authHeaders(token),
   });
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
+  return res.data;
+}
+
+export async function getChat(token: string, userId: string) {
+  const res = await axios.get(`${BASE_URL}/chat/${userId}`, {
+    headers: authHeaders(token),
+  });
+  return res.data;
+}
+
+export async function sendMessage(
+  token: string,
+  userId: string,
+  content: string
+) {
+  const res = await axios.post(
+    `${BASE_URL}/send_message`,
+    { user_id: userId, content },
+    { headers: authHeaders(token) }
+  );
+  return res.data;
 }

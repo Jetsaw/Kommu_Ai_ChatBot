@@ -1,56 +1,44 @@
 import React, { useState } from "react";
-import { me } from "../api/backend";
-import {
-  readStoredToken,
-  writeStoredToken,
-  clearStoredToken,
-} from "../utils/tokenStorage";
+import { getAgentMe } from "../api/backend";
+import { saveToken } from "../utils/tokenStorage";
 
-export default function Login() {
-  
-  const [token, setToken] = useState(readStoredToken());
-  const [loading, setLoading] = useState(false);
+interface Props {
+  onLogin: (agent: string, token: string) => void;
+}
 
-  const onLogin = async () => {
-    const normalized = token.trim();
-    if (!normalized) {
-      alert("Enter a valid token");
-      return;
-    }
-    setLoading(true);
+export default function Login({ onLogin }: Props) {
+  const [token, setToken] = useState("");
+  const [error, setError] = useState("");
+
+  const handleLogin = async () => {
     try {
-      
-      writeStoredToken(normalized);
-      await me();
-      window.location.reload();
+      const res = await getAgentMe(token.trim());
+      saveToken(token.trim());
+      onLogin(res.name, token.trim());
     } catch {
-      alert("Invalid token");
-      
-      clearStoredToken();
-    } finally {
-      setLoading(false);
+      setError("Invalid or unauthorized token");
     }
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-slate-950 text-slate-100">
-      <div className="w-full max-w-sm bg-slate-900/50 border border-slate-800 p-6 rounded-xl">
-        <h1 className="text-xl font-bold mb-2">Kommu CS Dashboard</h1>
-        <p className="text-sm text-slate-400 mb-4">Enter your agent token</p>
+    <div className="h-screen flex items-center justify-center bg-gray-100">
+      <div className="bg-white shadow-lg rounded-2xl p-8 w-96">
+        <h1 className="text-2xl font-bold text-center mb-6 text-blue-700">
+          Kommu Agent Login
+        </h1>
         <input
-          className="w-full p-2 rounded bg-slate-800 border border-slate-700 mb-3"
-          placeholder="agent token (e.g. Kommu_123)"
           value={token}
           onChange={(e) => setToken(e.target.value)}
+          className="border w-full rounded-lg px-3 py-2 mb-4"
+          placeholder="Enter Agent Token"
         />
         <button
-          onClick={onLogin}
-          disabled={loading}
-          className="w-full py-2 rounded bg-blue-600 hover:bg-blue-500 font-semibold disabled:opacity-50"
+          onClick={handleLogin}
+          className="w-full bg-blue-600 text-white rounded-lg py-2 hover:bg-blue-700"
         >
-          
-          {loading ? "Checking..." : "Login"}
+          Login
         </button>
+        {error && <p className="text-red-500 text-sm mt-3 text-center">{error}</p>}
       </div>
     </div>
   );
