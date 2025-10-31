@@ -222,24 +222,31 @@ def verify_agent_token(token: str) -> str | None:
     return AGENT_TOKENS.get(token)
 
 def list_sessions():
-    conn = sqlite3.connect("sessions.db")
-    cur = conn.cursor()
-    cur.execute("SELECT user_id, data FROM sessions")
+    db_path = "/app/data/sessions.db"
     rows = []
-    for user_id, data in cur.fetchall():
-        try:
-            sess = json.loads(data)
-            hist = sess.get("history", [])
-            last = hist[-1]["text"] if hist else ""
-            rows.append({
-                "user_id": user_id,
-                "lastMessage": last,
-                "frozen": sess.get("frozen", False),
-                "lang": sess.get("lang", "EN")
-            })
-        except Exception:
-            pass
-    conn.close()
+    try:
+        if not os.path.exists(db_path):
+            print(f"[WARN] Database not found: {db_path}", flush=True)
+            return []
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute("SELECT user_id, data FROM sessions")
+        for user_id, data in cur.fetchall():
+            try:
+                sess = json.loads(data)
+                hist = sess.get("history", [])
+                last = hist[-1]["text"] if hist else ""
+                rows.append({
+                    "user_id": user_id,
+                    "lastMessage": last,
+                    "frozen": sess.get("frozen", False),
+                    "lang": sess.get("lang", "EN")
+                })
+            except Exception as e:
+                print(f"[WARN] Skipped bad session {user_id}: {e}", flush=True)
+        conn.close()
+    except Exception as e:
+        print(f"[ERROR] list_sessions failed: {e}", flush=True)
     return rows
 
 def get_chat_history(user_id: str):

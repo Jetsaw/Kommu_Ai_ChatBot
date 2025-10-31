@@ -1,39 +1,43 @@
-FROM node:22-slim AS frontend-builder
+  GNU nano 4.8                               Dockerfile                                          # ---------- FRONTEND BUILD ----------
+FROM node:22-alpine AS frontend-builder
 WORKDIR /app/kommu-ui
+
+# Install dependencies for the UI
 COPY kommu-ui/package*.json ./
-ARG FRONTEND_PYTHON_PACKAGES=""
-RUN if [ -n "$FRONTEND_PYTHON_PACKAGES" ]; then \
-      if command -v apt-get >/dev/null 2>&1; then \
-        apt-get update && \
-        apt-get install -y --no-install-recommends python3 python3-pip && \
-        rm -rf /var/lib/apt/lists/*; \
-      elif command -v apk >/dev/null 2>&1; then \
-        apk add --no-cache python3 py3-pip; \
-      else \
-        echo "Unable to install python3-pip in this image" >&2 && exit 1; \
-      fi && \
-      python3 -m pip install --no-cache-dir $FRONTEND_PYTHON_PACKAGES; \
-    fi
-RUN npm ci --include=dev
-COPY kommu-ui/ .
-RUN if [ -f vite.config.js ]; then mv vite.config.js vite.config.mjs; fi
-ENV NODE_OPTIONS="--experimental-vm-modules"
-ENV NODE_ENV=production
+RUN npm install && npm install -D tailwindcss postcss autoprefixer
+
+# Copy full frontend source
+COPY kommu-ui/ ./
 RUN npm run build
 
-
-
-FROM python:3.11-slim AS backend
+# ---------- BACKEND BUILD ----------
+FROM python:3.11-slim AS kai
 WORKDIR /app
 
+# Install required system packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git curl build-essential && \
+    git curl build-essential libgomp1 && \
     rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy backend files
 COPY . .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir openai==1.12.0
+
+# Copy built frontend
 COPY --from=frontend-builder /app/kommu-ui/dist /app/kommu-ui/dist
-RUN mkdir -p logs data media
+
+# Expose app port
 EXPOSE 6090
-CMD ["gunicorn", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "app:app", "--bind", "0.0.0.0:6090"]
+
+# Start the FastAPI app with Gunicorn + Uvicorn worker
+CMD ["gunicorn", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "app:app", "--bind", "0.0.0.0>
+
+
+
+
+
+
+

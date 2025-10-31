@@ -1,232 +1,180 @@
-import React, { useEffect, useState } from "react";
-import { getAgentMe, getChats, getChat, sendMessage } from "./api";
-import ChatList from "./components/ChatList";
-import ChatWindow from "./components/ChatWindow";
-import {
-  readStoredToken,
-  writeStoredToken,
-  clearStoredToken,
-} from "./utils/tokenStorage";
+import React, { useState, useEffect } from "react";
+import { getChats, getChat, sendMessage, getAgentMe } from "./api";
 
 export default function App() {
-  
- 
-
-  const [token, setToken] = useState(() => readStoredToken());
-  const [tokenInput, setTokenInput] = useState(() => readStoredToken() || "");
+  const [token, setToken] = useState(localStorage.getItem("agentToken") || "");
   const [agent, setAgent] = useState(null);
   const [chats, setChats] = useState([]);
   const [selected, setSelected] = useState(null);
   const [messages, setMessages] = useState([]);
-  const [content, setContent] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [status, setStatus] = useState("Idle");
-  const [error, setError] = useState("");
+  const [input, setInput] = useState("");
+  const [status, setStatus] = useState("");
 
-  // ---------------- Agent Auth ----------------
+  // Verify token and load chats
   useEffect(() => {
-    if (!token) {
-      
-      return;
-    }
-
-    console.log("Checking agent token:", token);
-    setStatus("Connecting to /api/agent/me ...");
+    if (!token) return;
     getAgentMe(token)
-      .then((data) => {
-
-        console.log("Agent verified:", data);
-        setStatus("Agent verified");
-        setAgent(data.name);
-        setError("");
+      .then((d) => {
+        setAgent(d.name);
         loadChats();
       })
-      .catch((err) => {
-
-        console.error("Login error:", err);
+      .catch(() => {
+        localStorage.removeItem("agentToken");
         setAgent(null);
-
-        setError(`Login failed: ${err.message || "unknown error"}`);
-        setStatus("Unauthorized or server error");
-        clearStoredToken();
-        setToken("");
       });
   }, [token]);
 
-  async function loadChats() {
+  const loadChats = async () => {
     try {
-      
-      const activeToken = token || readStoredToken();
-      setStatus("Loading chats...");
-      const data = await getChats(activeToken);
+      const data = await getChats(token);
       setChats(data);
-      
       setStatus("Chats loaded");
-    } catch (err) {
-      
-      console.error("Failed to load chats:", err);
-      setStatus(`Error loading chats: ${err.message}`);
+    } catch (e) {
+      setStatus("Error loading chats");
     }
-  }
+  };
 
-  async function loadChat(userId) {
-    try {
-      
-      const activeToken = token || readStoredToken();
-      setStatus(`Loading chat history for ${userId}...`);
-      const data = await getChat(activeToken, userId);
-      setSelected(userId);
-@@ -87,107 +83,109 @@ export default function App() {
-    }
-  }
+  const loadChat = async (id) => {
+    setSelected(id);
+    const data = await getChat(token, id);
+    setMessages(data);
+  };
 
-  async function handleSend() {
-    if (!content.trim()) return;
-    setLoading(true);
-    try {
-      
-      const activeToken = token || readStoredToken();
-      await sendMessage(activeToken, selected, content);
-      setContent("");
-      await loadChat(selected);
-      
-      setStatus("Message sent");
-    } catch (err) {
-      console.error(err);
-      
-      setStatus(`Failed to send: ${err.message}`);
-      alert("Failed to send message");
-    } finally {
-      setLoading(false);
-    }
-  }
+  const handleSend = async () => {
+    if (!input.trim()) return;
+    await sendMessage(token, selected, input);
+    setInput("");
+    await loadChat(selected);
+  };
 
-  async function handleLogin() {
-    
-    if (!tokenInput.trim()) {
-      alert("Enter a valid agent token");
-      return;
-    }
-
-    
-    
-    console.log("Attempting login with token:", tokenInput);
-    setStatus("Verifying token...");
-    try {
-      
-
-      const normalized = tokenInput.trim();
-      const res = await getAgentMe(normalized);
-      console.log("Login success:", res);
-      const stored = writeStoredToken(normalized);
-      setToken(stored);
-      setTokenInput(stored);
-      setAgent(res.name);
-      
-
-      setStatus("Login successful");
-      window.location.reload();
-    } catch (err) {
-      
-
-      console.error("Login failed:", err);
-      setError(`Invalid token: ${err.message}`);
-      setStatus("Invalid or unauthorized");
-      clearStoredToken();
-      setAgent(null);
-    }
-  }
-
-  function handleLogout() {
-    
-
-    clearStoredToken();
-    setToken("");
-    setTokenInput("");
-    setAgent(null);
-    
-
-    setStatus("Logged out");
-  }
-
-  // Auto-refresh chat list every 10 seconds
-  useEffect(() => {
-    if (agent) {
-      const timer = setInterval(loadChats, 10000);
-      return () => clearInterval(timer);
-    }
-  }, [agent]);
-
-  // ---------------- Login Page ----------------
-  if (!agent) {
+  if (!agent)
     return (
-      <div className="flex flex-col items-center justify-center h-screen bg-gray-100 text-center">
-        <h1 className="text-2xl font-bold text-kommu-blue mb-4">
-          Kommu Agent Dashboard (Debug Mode)
+      <div className="flex flex-col items-center justify-center h-screen bg-gray-100">
+        <h1 className="text-2xl font-semibold text-kommu-blue mb-4">
+          Kommu Agent Dashboard
         </h1>
         <input
-          type="text"
-          placeholder="Enter Agent Token"
-          
-          value={tokenInput}
-          onChange={(e) => setTokenInput(e.target.value)}
-          className="border border-gray-400 rounded p-2 w-64 mb-2"
+          value={token}
+          onChange={(e) => setToken(e.target.value)}
+          placeholder="Enter agent token"
+          className="border px-3 py-2 rounded w-64 mb-3"
         />
         <button
-          onClick={handleLogin}
-          className="bg-kommu-blue text-white px-4 py-2 rounded hover:bg-blue-700"
+          onClick={() => localStorage.setItem("agentToken", token)}
+          className="bg-kommu-blue text-white px-4 py-2 rounded"
         >
           Login
         </button>
-
-        {status && (
-          <p className="text-gray-700 mt-3 text-sm font-mono">{status}</p>
-        )}
-        {error && (
-          <p className="text-red-600 mt-2 text-sm font-mono">{error}</p>
-        )}
-
-        <p className="text-gray-500 text-sm mt-4">
-          
-          Tip: Use Agent35 or Agent34 from your .env file
-        </p>
       </div>
     );
-  }
 
-  // ---------------- Chat Dashboard ----------------
-@@ -199,26 +197,34 @@ export default function App() {
-        <h2 className="font-semibold">Logged in as {agent}</h2>
-        <button
-          onClick={handleLogout}
-          className="bg-white text-kommu-blue px-3 py-1 rounded hover:bg-gray-100"
-        >
-          Logout
-        </button>
+  return (
+    <div className="flex h-screen">
+      {/* Sidebar */}
+      <div className="w-1/3 md:w-1/4 bg-white border-r flex flex-col">
+        <div className="p-4 border-b flex justify-between items-center">
+          <span className="font-semibold text-kommu-blue">
+            Agent: {agent}
+          </span>
+          <button
+            onClick={() => {
+              localStorage.removeItem("agentToken");
+              window.location.reload();
+            }}
+            className="text-sm text-red-600 hover:underline"
+          >
+            Logout
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto">
+          {chats.length === 0 && (
+            <p className="text-gray-400 text-center mt-10">
+              No active sessions
+            </p>
+          )}
+          {chats.map((c) => (
+            <div
+              key={c.user_id}
+              onClick={() => loadChat(c.user_id)}
+              className={`p-3 cursor-pointer hover:bg-gray-100 ${
+                selected === c.user_id ? "bg-gray-200" : ""
+              }`}
+            >
+              <div className="font-semibold text-gray-800">{c.user_id}</div>
+              <div className="text-gray-500 text-sm truncate">
+                {c.lastMessage}
+              </div>
+              <div className="text-xs text-gray-400 mt-1">
+                {c.lang === "BM" ? "🇲🇾 BM" : "🇬🇧 EN"}{" "}
+                {c.frozen && "🧊 Frozen"}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="text-xs text-gray-500 text-center py-2 border-t">
+          {status}
+        </div>
       </div>
 
-      <div className="text-center text-sm text-gray-500 py-2 bg-gray-100 border-b">
-        {status}
-      </div>
+      {/* Chat Window */}
+      <div className="flex flex-col flex-1 bg-kommu-gray">
+        {selected ? (
+          <>
+            <div className="p-3 bg-white border-b font-semibold">
+              {selected}
+            </div>
 
-      {/* Main Content */}
-      <div className="flex flex-1">
-        <ChatList
-          chats={chats}
-          selected={selected}
-          onSelect={loadChat}
-          agent={agent}
-          onLogout={handleLogout}
-        />
-        <ChatWindow
-          messages={messages}
-          selected={selected}
-          
-          content={content}
-          onChange={setContent}
-          onSend={handleSend}
-          loading={loading}
-        />
+            <div className="flex-1 overflow-y-auto p-4">
+              {messages.map((m, i) => (
+                <div
+                  key={i}
+                  className={`mb-3 flex ${
+                    m.sender === "agent"
+                      ? "justify-end"
+                      : m.sender === "bot"
+                      ? "justify-center"
+                      : "justify-start"
+                  }`}
+                >
+                  <div
+                    className={`rounded-2xl px-4 py-2 max-w-md ${
+                      m.sender === "agent"
+                        ? "bg-kommu-blue text-white"
+                        : m.sender === "bot"
+                        ? "bg-gray-300 text-gray-700 text-sm italic"
+                        : "bg-white border"
+                    }`}
+                  >
+                    {m.content}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="p-3 bg-white border-t flex">
+              <input
+                type="text"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                placeholder="Type a message..."
+                className="flex-1 border rounded px-3 py-2 mr-2"
+                onKeyDown={(e) => e.key === "Enter" && handleSend()}
+              />
+              <button
+                onClick={handleSend}
+                className="bg-kommu-blue text-white px-4 py-2 rounded"
+              >
+                Send
+              </button>
+            </div>
+          </>
+        ) : (
+          <div className="flex-1 flex items-center justify-center text-gray-400">
+            Select a chat to start messaging
+          </div>
+        )}
       </div>
     </div>
   );
