@@ -8,7 +8,6 @@ import requests
 from deep_translator import GoogleTranslator
 from fastapi_utils.tasks import repeat_every
 
-
 from config import (
     TZ_REGION, OFFICE_START, OFFICE_END, PORT,
     SOP_DOC_URL, WARRANTY_CSV_URL,
@@ -35,7 +34,6 @@ os.makedirs("logs", exist_ok=True)
 handler = RotatingFileHandler("logs/kai.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8")
 logging.basicConfig(level=logging.INFO, handlers=[handler])
 log = logging.getLogger("kai")
-
 
 app = FastAPI(title="Kai - Kommu Chatbot")
 
@@ -153,6 +151,7 @@ def run_rag_dual(user_text: str, lang_hint: str = "EN", user_id: str | None = No
             return llm.strip()
     return ""
 
+
 # ----------------- RAG Loader -----------------
 def load_rag():
     global rag_sop, rag_web
@@ -168,6 +167,7 @@ def load_rag():
     except Exception as e:
         log.info(f"[Kai] Website RAG not available: {e}")
         rag_web = None
+
 
 rag_sop, rag_web = None, None
 try:
@@ -186,7 +186,6 @@ try:
     fetch_warranty_all()
 except Exception as e:
     log.error(f"[Startup] Error: {e}")
-
 # ----------------- Scheduler -----------------
 @app.on_event("startup")
 def startup_event():
@@ -199,6 +198,8 @@ def auto_refresh():
         log.info("[AutoRefresh] Warranty refreshed")
     except Exception as e:
         log.error(f"[AutoRefresh] {e}")
+
+
 # ----------------- Admin Endpoint -----------------
 @app.api_route("/admin/reset_memory", methods=["GET", "POST"])
 async def admin_reset_memory(request: Request):
@@ -238,6 +239,8 @@ def list_sessions():
                 last = hist[-1]["text"] if hist else ""
                 rows.append({
                     "user_id": user_id,
+                    "name": sess.get("name", user_id),
+                    "profile_pic": sess.get("profile_pic", ""),
                     "lastMessage": last,
                     "frozen": sess.get("frozen", False),
                     "lang": sess.get("lang", "EN")
@@ -250,17 +253,28 @@ def list_sessions():
     return rows
 
 def get_chat_history(user_id: str):
-    conn = sqlite3.connect("sessions.db")
-    cur = conn.cursor()
-    cur.execute("SELECT data FROM sessions WHERE user_id=?", (user_id,))
-    row = cur.fetchone()
-    conn.close()
-    if not row:
+    db_path = "/app/data/sessions.db"
+    if not os.path.exists(db_path):
+        log.error(f"[get_chat_history] DB not found at {db_path}")
         return []
-    sess = json.loads(row[0])
-    hist = sess.get("history", [])
-    return [{"sender": h.get("role", "bot"), "content": h.get("text", "")} for h in hist]
 
+    try:
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute("SELECT data FROM sessions WHERE user_id=?", (user_id,))
+        row = cur.fetchone()
+        conn.close()
+        if not row:
+            return []
+        sess = json.loads(row[0])
+        hist = sess.get("history", [])
+        return [
+            {"sender": h.get("role", "bot"), "content": h.get("text", "")}
+            for h in hist
+        ]
+    except Exception as e:
+        log.error(f"[get_chat_history] Error for {user_id}: {e}")
+        return []
 
 @app.get("/api/agent/me")
 async def get_agent_me(authorization: str = Header("")):
@@ -289,22 +303,24 @@ async def send_agent_message(request: Request, authorization: str = Header("")):
     token = authorization.replace("Bearer ", "").strip()
     agent = verify_agent_token(token)
     if not agent:
+        log.warning(f"[AgentAPI] Unauthorized token: {token}")
         return JSONResponse({"error": "unauthorized"}, status_code=401)
-
-    data = await request.json()
-    user_id = data.get("user_id")
-    content = data.get("content", "").strip()
-    if not user_id or not content:
-        return JSONResponse({"error": "missing fields"}, status_code=400)
-
-    # Log the message and forward via WhatsApp if needed
-    from media_handler import send_whatsapp_message
-    add_message_to_history(user_id, "agent", content)
-    send_whatsapp_message(user_id, f"{agent}: {content}")
-
-    log.info(f"[Agent:{agent}] → {user_id}: {content}")
-    return {"status": "sent"}
-
+    try:
+        data = await request.json()
+        user_id = data.get("user_id")
+        content = data.get("content", "").strip()
+        if not user_id or not content:
+            return JSONResponse({"error": "missing fields"}, status_code=400)
+        log.info(f"[AgentAPI] Agent={agent} sending to {user_id}: {content}")
+        from datetime import datetime
+        from media_handler import send_whatsapp_message
+        add_message_to_history(user_id, "agent", content, time=datetime.now().isoformat())
+        send_whatsapp_message(user_id, f"{agent}: {content}")
+        log.info(f"[Agent:{agent}] → {user_id}: {content}")
+        return {"status": "sent"}
+    except Exception as e:
+        log.error(f"[AgentAPI] send_message failed: {e}", exc_info=True)
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 # ----------------- Webhook -----------------
@@ -321,10 +337,28 @@ async def webhook(request: Request):
         body = msg.get("text", {}).get("body", "").strip()
         msg_type = msg.get("type", "text")
 
+        # --- Safe extraction of profile info ---
+        contacts = value.get("contacts", [])
+        if contacts and isinstance(contacts[0], dict):
+            profile = contacts[0].get("profile", {}) or {}
+            user_name = profile.get("name", "Unknown")
+            profile_pic = contacts[0].get("profile_pic", "") if "profile_pic" in contacts[0] else ""
+        else:
+            user_name, profile_pic = "Unknown", ""
+
+        # --- Update session safely ---
+        try:
+            sess = get_session(wa_from)
+            sess["name"] = user_name
+            sess["profile_pic"] = profile_pic
+            from session_state import set_session
+            set_session(wa_from, sess)
+        except Exception as e:
+            log.warning(f"[Kai] Could not save profile info for {wa_from}: {e}")
+
         # --- Handle media ---
         if handle_incoming_media(msg, wa_from, add_message_to_history):
             return JSONResponse({"status": "media_received"})
-
         if not body:
             return JSONResponse({"status": "empty"})
 
@@ -336,6 +370,21 @@ async def webhook(request: Request):
         set_lang(wa_from, lang)
         aft = not is_office_hours()
         add_message_to_history(wa_from, "user", body)
+
+        # --- Auto-freeze trigger when user types "LA" or "live agent" ---
+        if lower in {"la", "live agent", "agent", "human"}:
+            try:
+                freeze(wa_from, True, mode="user")
+                msg_out = (
+                    "A live agent will take over shortly."
+                    if lang == "EN"
+                    else "Ejen manusia akan mengambil alih perbualan sebentar lagi."
+                )
+                send_whatsapp_message(wa_from, add_footer(msg_out, lang))
+                add_message_to_history(wa_from, "bot", msg_out)
+                return JSONResponse({"status": "frozen_by_user"})
+            except Exception as e:
+                log.error(f"[Kai] Failed to auto-freeze on LA: {e}")
 
         # --- Greeting ---
         if not sess.get("greeted") and has_any(["hi","hello","hai","helo","start","menu"], lower):
@@ -378,7 +427,6 @@ async def webhook(request: Request):
             lower_ans = answer.lower() if answer else ""
             year_in_text = extract_year(body)
             sop_years = parse_year_range(answer)
-
             if any(k in lower_ans for k in CAR_KEYWORDS):
                 if sop_years != (None, None) and year_in_text:
                     start, end = sop_years
@@ -389,14 +437,12 @@ async def webhook(request: Request):
                         send_whatsapp_message(wa_from, add_footer(msg_out, lang))
                         add_message_to_history(wa_from, "bot", msg_out)
                         return JSONResponse({"status": "car_year_not_supported"})
-
                 send_whatsapp_message(wa_from, add_footer(answer, lang))
                 add_message_to_history(wa_from, "bot", answer)
                 return JSONResponse({"status": "car_supported_from_sop"})
-
             msg_out = ("I'm not sure about that car. Does it have Adaptive Cruise Control (ACC) and Lane Keep Assist (LKA)?"
-                       if lang=="EN"
-                       else "Saya tidak pasti tentang kereta itu. Adakah ia mempunyai sistem Adaptive Cruise Control (ACC) dan Lane Keep Assist (LKA)?")
+                       if lang=="EN" else
+                       "Saya tidak pasti tentang kereta itu. Adakah ia mempunyai sistem Adaptive Cruise Control (ACC) dan Lane Keep Assist (LKA)?")
             set_last_intent(wa_from, "car_unknown")
             send_whatsapp_message(wa_from, add_footer(msg_out, lang))
             add_message_to_history(wa_from, "bot", msg_out)
@@ -426,5 +472,3 @@ async def webhook(request: Request):
         except Exception:
             pass
         return JSONResponse({"status": "error", "error": str(e)})
-
-

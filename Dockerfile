@@ -1,4 +1,4 @@
-  GNU nano 4.8                               Dockerfile                                          # ---------- FRONTEND BUILD ----------
+GNU nano 4.8                               Dockerfile                                          # ---------- FRONTEND BUILD ----------
 FROM node:22-alpine AS frontend-builder
 WORKDIR /app/kommu-ui
 
@@ -24,7 +24,7 @@ COPY . .
 
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install --no-cache-dir openai==1.12.0
+
 
 # Copy built frontend
 COPY --from=frontend-builder /app/kommu-ui/dist /app/kommu-ui/dist
@@ -33,7 +33,8 @@ COPY --from=frontend-builder /app/kommu-ui/dist /app/kommu-ui/dist
 EXPOSE 6090
 
 # Start the FastAPI app with Gunicorn + Uvicorn worker
-CMD ["gunicorn", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "app:app", "--bind", "0.0.0.0>
+CMD ["gunicorn", "-w", "1", "-k", "uvicorn.workers.UvicornWorker", "app:app", "--bind", "0.0.0.0:6090"]
+
 
 
 
