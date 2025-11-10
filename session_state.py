@@ -144,3 +144,8 @@ def get_all_user_ids():
     rows = [r[0] for r in c.fetchall()]
     conn.close()
     return rows
+
+# ----------------- Backward Compatibility Shim -----------------
+def set_session(user_id: str, data: dict):
+    """Legacy alias for save_session (for backward compatibility)."""
+    save_session(user_id, data)

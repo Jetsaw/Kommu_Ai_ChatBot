@@ -128,8 +128,9 @@ def run_rag_dual(user_text: str, lang_hint: str = "EN", user_id: str | None = No
 
     context = rag_sop.build_context(user_text, topk=4) if rag_sop else ""
     if context.strip():
-        prompt = f"{history_text}\nUser: {user_text}\n\nContext:\n{context}\n\n{lang_instruction}"
-        llm = chat_completion(sys_prompt, prompt)
+        # Combine prompts into a single string
+        full_prompt = f"{sys_prompt}\n\n{history_text}\nUser: {user_text}\n\nContext:\n{context}\n\n{lang_instruction}"
+        llm = chat_completion(full_prompt)
         if llm:
             try:
                 if lang_hint == "BM":
@@ -140,8 +141,8 @@ def run_rag_dual(user_text: str, lang_hint: str = "EN", user_id: str | None = No
 
     context = rag_web.build_context(user_text, topk=4) if rag_web else ""
     if context.strip():
-        prompt = f"{history_text}\nUser: {user_text}\n\nContext:\n{context}\n\n{lang_instruction}"
-        llm = chat_completion(sys_prompt, prompt)
+        full_prompt = f"{sys_prompt}\n\n{history_text}\nUser: {user_text}\n\nContext:\n{context}\n\n{lang_instruction}"
+        llm = chat_completion(full_prompt)
         if llm:
             try:
                 if lang_hint == "BM":
@@ -149,8 +150,8 @@ def run_rag_dual(user_text: str, lang_hint: str = "EN", user_id: str | None = No
             except Exception as e:
                 log.warning(f"[Translate] BM translation failed: {e}")
             return llm.strip()
-    return ""
 
+    return ""
 
 # ----------------- RAG Loader -----------------
 def load_rag():
@@ -305,23 +306,107 @@ async def send_agent_message(request: Request, authorization: str = Header("")):
     if not agent:
         log.warning(f"[AgentAPI] Unauthorized token: {token}")
         return JSONResponse({"error": "unauthorized"}, status_code=401)
+
     try:
         data = await request.json()
         user_id = data.get("user_id")
         content = data.get("content", "").strip()
         if not user_id or not content:
             return JSONResponse({"error": "missing fields"}, status_code=400)
-        log.info(f"[AgentAPI] Agent={agent} sending to {user_id}: {content}")
-        from datetime import datetime
-        from media_handler import send_whatsapp_message
-        add_message_to_history(user_id, "agent", content, time=datetime.now().isoformat())
-        send_whatsapp_message(user_id, f"{agent}: {content}")
-        log.info(f"[Agent:{agent}] → {user_id}: {content}")
+
+        log.info(f"[AgentAPI] Live Agent sending to {user_id}: {content}")
+
+        # Typing indicator simulation
+        try:
+            from time import sleep
+            send_whatsapp_typing(user_id, True)
+            sleep(1.2)
+            send_whatsapp_typing(user_id, False)
+        except Exception as e:
+            log.warning(f"[AgentAPI] Typing indicator failed: {e}")
+
+        # Save message into session log
+        timestamp = datetime.now().strftime("%H:%M")
+        add_message_to_history(user_id, "agent", f"[{timestamp}] {content}")
+
+        # ✅ Send via real WhatsApp API
+        send_whatsapp_message(user_id, f"Live Agent ({agent}): {content}")
+
+        log.info(f"[LiveAgent] Message delivered → {user_id}")
         return {"status": "sent"}
+
     except Exception as e:
         log.error(f"[AgentAPI] send_message failed: {e}", exc_info=True)
         return JSONResponse({"error": str(e)}, status_code=500)
 
+# ----------------- Agent Freeze / Resume API -----------------
+@app.post("/api/freeze")
+async def freeze_chat(request: Request, authorization: str = Header("")):
+    token = authorization.replace("Bearer ", "").strip()
+    agent = verify_agent_token(token)
+    if not agent:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    data = await request.json()
+    user_id = data.get("user_id")
+    if not user_id:
+        return JSONResponse({"error": "missing user_id"}, status_code=400)
+
+    try:
+        freeze(user_id, True, mode="agent")
+        log.info(f"[AgentAPI] Chat frozen by {agent} for user {user_id}")
+        send_whatsapp_message(user_id, "A live agent has taken over this chat.")
+        return {"status": "frozen"}
+    except Exception as e:
+        log.error(f"[AgentAPI] freeze_chat failed: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/unfreeze")
+async def unfreeze_chat(request: Request, authorization: str = Header("")):
+    token = authorization.replace("Bearer ", "").strip()
+    agent = verify_agent_token(token)
+    if not agent:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    data = await request.json()
+    user_id = data.get("user_id")
+    if not user_id:
+        return JSONResponse({"error": "missing user_id"}, status_code=400)
+
+    try:
+        freeze(user_id, False, mode="agent")
+        log.info(f"[AgentAPI] Chat resumed to bot by {agent} for user {user_id}")
+        send_whatsapp_message(user_id, "Bot resumed. How can I help?")
+        return {"status": "unfrozen"}
+    except Exception as e:
+        log.error(f"[AgentAPI] unfreeze_chat failed: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+    
+# ----------------- WhatsApp Typing Indicator -----------------
+def send_whatsapp_typing(to: str, is_agent: bool = False):
+    """Send a WhatsApp typing/on/off state (simulated via 'action' message type)."""
+    url = f"https://graph.facebook.com/v17.0/{os.getenv('META_PHONE_NUMBER_ID')}/messages"
+    headers = {
+        "Authorization": f"Bearer {os.getenv('META_PERMANENT_TOKEN','')}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "action",
+        "action": {"typing": "on" if is_agent else "off"}
+    }
+
+    try:
+        r = requests.post(url, headers=headers, json=payload, timeout=5)
+        if r.status_code >= 400:
+            log.warning(f"[Kai] Typing indicator failed {r.status_code}: {r.text}")
+    except Exception as e:
+        log.warning(f"[Kai] Typing indicator error: {e}")
+        
 
 # ----------------- Webhook -----------------
 @app.post("/webhook")

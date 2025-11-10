@@ -2,11 +2,67 @@
 @tailwind components;
 @tailwind utilities;
 
-
+/* Custom Scrollbar */
 ::-webkit-scrollbar {
   width: 6px;
 }
 ::-webkit-scrollbar-thumb {
-  background: #ccc;
+  background: #bbb;
   border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #888;
+}
+
+/* Smooth scroll for chat container */
+.scroll-smooth {
+  scroll-behavior: smooth;
+}
+
+/* Fade-in & slide animation for messages */
+@keyframes fadeSlideUp {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.message-bubble {
+  animation: fadeSlideUp 0.25s ease-out;
+}
+
+/* Typing bubble animation (pulsing dots like WhatsApp) */
+.typing-indicator {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+.typing-indicator span {
+  width: 6px;
+  height: 6px;
+  background-color: #fff;
+  border-radius: 50%;
+  opacity: 0.6;
+  animation: blink 1.4s infinite;
+}
+.typing-indicator span:nth-child(2) {
+  animation-delay: 0.2s;
+}
+.typing-indicator span:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes blink {
+  0%, 80%, 100% {
+    opacity: 0.6;
+    transform: translateY(0);
+  }
+  40% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
 }

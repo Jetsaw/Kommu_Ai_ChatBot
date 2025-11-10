@@ -1,338 +1,526 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Header from "./components/Header";
-import ChatList from "./components/ChatList";
-import ChatWindow from "./components/ChatWindow";
-import MessageInput from "./components/MessageInput";
-import { getToken, setToken as saveToken, clearToken } from "./utils/tokenStorage";
+import React, { useEffect, useState, useCallback, useRef } from "react";
+import { getToken, setToken, clearToken } from "./utils/tokenStorage";
 
-type ChatSummary = {
-  user_id: string;
-  name?: string;
-  profile_pic?: string;
-  lastMessage?: string;
-  frozen?: boolean;
-  lang?: string;
-};
-
-type ChatMessage = {
-  sender: "user" | "bot" | "agent";
-  content: string;
-};
-
-const API_BASE = import.meta.env.VITE_API_BASE || "/api";
+const API_BASE = import.meta.env.VITE_API_BASE || "https://api.kommu.ai/api";
 
 export default function App() {
-  const [token, setToken] = useState<string | null>(getToken());
-  const [agentName, setAgentName] = useState<string>("");
-  const [status, setStatus] = useState<string>("Checking access…");
-  const [syncing, setSyncing] = useState<boolean>(false);
-
-  const [chats, setChats] = useState<ChatSummary[]>([]);
+  const [token, setTok] = useState(getToken());
+  const [loginInput, setLoginInput] = useState("");
+  const [agent, setAgent] = useState("");
+  const [chats, setChats] = useState<any[]>([]);
+  const [messages, setMessages] = useState<any[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [input, setInput] = useState("");
+  const [status, setStatus] = useState("");
+  const [darkMode, setDarkMode] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [botTyping, setBotTyping] = useState(false);
 
-  const [searchTerm, setSearchTerm] = useState<string>("");
-  const [draft, setDraft] = useState<string>("");
+  // --- Rename chat state ---
+  const [renameMode, setRenameMode] = useState(false);
+  const [renameTarget, setRenameTarget] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
 
-  const [theme, setTheme] = useState<"light" | "dark">(
-    (localStorage.getItem("kommu_theme") as "light" | "dark") || "light"
-  );
+  // --- Scroll & unread state ---
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [isLoadingOld, setIsLoadingOld] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(40);
+  const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
 
-  const listTimerRef = useRef<number | null>(null);
-  const chatTimerRef = useRef<number | null>(null);
-
-  // ---------- Theme ----------
+  // ---------------- Verify agent ----------------
   useEffect(() => {
-    localStorage.setItem("kommu_theme", theme);
-    const root = document.documentElement;
-    if (theme === "dark") root.classList.add("dark");
-    else root.classList.remove("dark");
-  }, [theme]);
-
-  // ---------- Verify token ----------
-  useEffect(() => {
-    if (!token) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        setStatus("Verifying…");
-        const res = await fetch(`${API_BASE}/agent/me`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!res.ok) throw new Error("Unauthorized");
-        const data = await res.json();
-        if (cancelled) return;
-        setAgentName(data.name || "Agent");
-        setStatus("Ready");
-        await loadChats();
-      } catch {
-        if (!cancelled) {
-          setStatus("Authentication failed");
-          handleLogout();
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    if (token) verifyAgent(token);
   }, [token]);
 
-  // ---------- Load chats ----------
-  const loadChats = useCallback(async () => {
-    if (!token) return;
-    setSyncing(true);
+  const verifyAgent = async (tok: string) => {
     try {
-      const res = await fetch(`${API_BASE}/chats`, {
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await fetch(`${API_BASE}/agent/me`, {
+        headers: { Authorization: `Bearer ${tok}` },
       });
-      const data = (await res.json()) as ChatSummary[];
-      setChats(data);
-      setStatus(`Updated ${new Date().toLocaleTimeString()}`);
-    } catch (e) {
-      setStatus("Failed to refresh chats");
-      // console.error(e);
-    } finally {
-      setSyncing(false);
+      if (!res.ok) throw new Error("Invalid token");
+      const data = await res.json();
+      setAgent(data.name);
+      setToken(tok);
+      loadChats(tok);
+    } catch {
+      clearToken();
+      setTok(null);
+      setStatus("Invalid token. Please re-login.");
     }
-  }, [token]);
+  };
 
-  // ---------- Load single chat ----------
-  const loadChat = useCallback(
-    async (userId: string, silent = false) => {
-      if (!token) return;
+  // ---------------- Load chat list ----------------
+  const loadChats = useCallback(
+    async (tok?: string) => {
       try {
-        if (!silent) setStatus("Loading conversation…");
-        const res = await fetch(`${API_BASE}/chat/${userId}`, {
-          headers: { Authorization: `Bearer ${token}` },
+        const res = await fetch(`${API_BASE}/chats`, {
+          headers: { Authorization: `Bearer ${tok || token}` },
         });
-        const data = (await res.json()) as ChatMessage[];
-        setMessages(data);
-        if (!silent) setStatus("Conversation loaded");
-      } catch {
-        if (!silent) setStatus("Failed to load conversation");
+        const data = await res.json();
+        setChats([...data].reverse());
+      } catch (e) {
+        console.error("loadChats error:", e);
       }
     },
     [token]
   );
 
-  // ---------- Send message ----------
-  const handleSend = useCallback(async () => {
-    if (!token || !selected || !draft.trim()) return;
-    setStatus("Sending…");
+  // ---------------- Load messages ----------------
+  const loadChat = useCallback(
+    async (userId: string, silent = false) => {
+      try {
+        if (!silent) {
+          setSelected(userId);
+          setVisibleCount(40); // reset window only when switching chats
+          setUnreadCounts((prev) => ({ ...prev, [userId]: 0 }));
+        }
+        const res = await fetch(`${API_BASE}/chat/${userId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const data = await res.json();
+
+        const slice = data.slice(-visibleCount);
+        setMessages(
+          slice.map((m: any) => ({
+            sender: m.sender,
+            content: m.content,
+            time:
+              m.time ||
+              m.timestamp ||
+              m.created_at ||
+              m.sent_at ||
+              new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+          }))
+        );
+
+        scrollBottom(!silent);
+      } catch (e) {
+        console.error("loadChat error:", e);
+      }
+    },
+    [token, visibleCount]
+  );
+
+  // ---------------- Scroll management ----------------
+  const scrollBottom = (force = false) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 200;
+    if (force || nearBottom) setTimeout(() => (el.scrollTop = el.scrollHeight), 100);
+  };
+
+  // ---------------- Send message ----------------
+  const sendMessage = async () => {
+    if (!input.trim() || !selected) return;
+    setLoading(true);
+    setBotTyping(true);
     try {
-      const res = await fetch(`${API_BASE}/send_message`, {
+      await fetch(`${API_BASE}/send_message`, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ user_id: selected, content: draft.trim() }),
+        body: JSON.stringify({ user_id: selected, content: input }),
       });
-      if (res.ok) {
-        setDraft("");
-        await loadChat(selected);
-        setStatus("Sent");
-      } else {
-        setStatus("Failed to send");
-      }
-    } catch {
-      setStatus("Failed to send");
+      setInput("");
+      await loadChat(selected, true);
+      setTimeout(() => setBotTyping(false), 1500);
+    } catch (e) {
+      console.error("sendMessage:", e);
+    } finally {
+      setLoading(false);
     }
-  }, [token, selected, draft, loadChat]);
+  };
 
-  // ---------- Freeze / Resume via messages ----------
-  const handleFreeze = useCallback(async () => {
-    // Send the conventional trigger "LA" — your webhook can freeze on this
+  // ---------------- Mode toggle (Live Agent / Bot) ----------------
+  const setChatMode = async (mode: "bot" | "human") => {
     if (!selected) return;
-    setDraft("LA");
-    await handleSend();
-  }, [selected, handleSend]);
+    try {
+      const endpoint = mode === "human" ? "/api/freeze" : "/api/unfreeze";
+      await fetch(`${API_BASE}${endpoint}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ user_id: selected }),
+      });
+      setStatus(mode === "bot" ? "Chatbot resumed" : "Live agent takeover");
+      loadChats();
+    } catch (e) {
+      console.error("setChatMode:", e);
+    }
+  };
 
-  const handleResume = useCallback(async () => {
-    // Your webhook already supports "resume" to unfreeze
+  // ---------------- Periodic refresh & unread counter ----------------
+  useEffect(() => {
     if (!selected) return;
-    setDraft("resume");
-    await handleSend();
-  }, [selected, handleSend]);
+    const interval = setInterval(async () => {
+      const res = await fetch(`${API_BASE}/chat/${selected}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      const slice = data.slice(-visibleCount);
 
-  // ---------- Intervals ----------
+      // If new user message arrives while tab unfocused → increment unread
+      const last = data[data.length - 1];
+      if (last?.sender === "user" && !document.hasFocus()) {
+        setUnreadCounts((prev) => ({
+          ...prev,
+          [selected]: (prev[selected] || 0) + 1,
+        }));
+      }
+
+      setMessages(
+        slice.map((m: any) => ({
+          sender: m.sender,
+          content: m.content,
+          time:
+            m.time ||
+            m.timestamp ||
+            m.created_at ||
+            m.sent_at ||
+            new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        }))
+      );
+    }, 4000);
+    return () => clearInterval(interval);
+  }, [selected, token, visibleCount]);
+
+  // ---------------- Scroll-up to load older messages ----------------
   useEffect(() => {
-    if (!token || !agentName) return;
-    loadChats();
-    if (listTimerRef.current) window.clearInterval(listTimerRef.current);
-    listTimerRef.current = window.setInterval(loadChats, 15000);
-    return () => {
-      if (listTimerRef.current) window.clearInterval(listTimerRef.current);
-      listTimerRef.current = null;
+    const el = scrollRef.current;
+    if (!el || !selected) return;
+    const handleScroll = async () => {
+      if (el.scrollTop <= 30 && !isLoadingOld) {
+        setIsLoadingOld(true);
+        const prevScrollHeight = el.scrollHeight;
+        try {
+          const res = await fetch(`${API_BASE}/chat/${selected}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          const data = await res.json();
+          const newCount = Math.min(visibleCount + 40, data.length);
+          setVisibleCount(newCount);
+
+          const slice = data.slice(-newCount).map((m: any) => ({
+            sender: m.sender,
+            content: m.content,
+            time:
+              m.time ||
+              m.timestamp ||
+              m.created_at ||
+              m.sent_at ||
+              new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+          }));
+          setMessages(slice);
+
+          requestAnimationFrame(() => {
+            const diff = el.scrollHeight - prevScrollHeight;
+            el.scrollTop = diff + el.scrollTop;
+          });
+        } catch (e) {
+          console.error("Failed to load older messages:", e);
+        } finally {
+          setIsLoadingOld(false);
+        }
+      }
     };
-  }, [token, agentName, loadChats]);
+    el.addEventListener("scroll", handleScroll);
+    return () => el.removeEventListener("scroll", handleScroll);
+  }, [selected, token, visibleCount, isLoadingOld]);
 
-  useEffect(() => {
-    if (!token || !selected) return;
-    loadChat(selected);
-    if (chatTimerRef.current) window.clearInterval(chatTimerRef.current);
-    chatTimerRef.current = window.setInterval(() => loadChat(selected, true), 5000);
-    return () => {
-      if (chatTimerRef.current) window.clearInterval(chatTimerRef.current);
-      chatTimerRef.current = null;
-    };
-  }, [token, selected, loadChat]);
-
-  // ---------- Logout ----------
-  const handleLogout = useCallback(() => {
-    clearToken();
-    setToken(null);
-    setAgentName("");
-    setChats([]);
-    setMessages([]);
-    setSelected(null);
-    setDraft("");
-  }, []);
-
-  // ---------- Login Screen ----------
-  if (!token) {
-    const [tmpToken, setTmpToken] = useState<string>("");
+  // ---------------- Login screen ----------------
+  if (!token)
     return (
-      <div className="min-h-screen flex items-center justify-center bg-neutral-50 dark:bg-[#0b141a]">
-        <div className="w-[380px] rounded-xl border border-neutral-200 dark:border-[#1f2c33] bg-white dark:bg-[#111b21] p-6 shadow-sm">
-          <h1 className="text-xl font-semibold text-neutral-900 dark:text-white text-center">
-            Kommu Support Dashboard
-          </h1>
-          <p className="text-xs text-neutral-500 dark:text-[#8696a0] text-center mt-1">
-            Enter your agent token to continue
-          </p>
-          <div className="mt-4 space-y-3">
-            <input
-              className="w-full rounded-lg border border-neutral-300 dark:border-[#1f2c33] bg-white dark:bg-[#111b21] px-3 py-2 text-sm text-neutral-900 dark:text-[#e9edef] focus:outline-none focus:ring-2 focus:ring-[#2a5cff]"
-              placeholder="Agent token"
-              value={tmpToken}
-              onChange={(e) => setTmpToken(e.target.value)}
-            />
-            <button
-              className="w-full rounded-lg bg-[#2a5cff] py-2 text-sm font-semibold text-white hover:opacity-90"
-              onClick={async () => {
-                if (!tmpToken.trim()) return;
-                try {
-                  const res = await fetch(`${API_BASE}/agent/me`, {
-                    headers: { Authorization: `Bearer ${tmpToken.trim()}` },
-                  });
-                  if (!res.ok) throw new Error("Unauthorized");
-                  const data = await res.json();
-                  saveToken(tmpToken.trim());
-                  setToken(tmpToken.trim());
-                  setAgentName(data.name || "Agent");
-                } catch {
-                  alert("Invalid token");
-                }
-              }}
-            >
-              Continue
-            </button>
-          </div>
+      <div className="min-h-screen flex flex-col items-center justify-center bg-gray-100">
+        <img src="/kommu_logo.png" alt="Kommu Logo" className="w-40 mb-6 object-contain" />
+        <div className="bg-white p-6 rounded-xl shadow-md w-80">
+          <h2 className="text-lg font-semibold mb-3 text-center">Kommu CS Dashboard</h2>
+          <input
+            className="border w-full p-2 rounded mb-2"
+            placeholder="Enter your agent token"
+            value={loginInput}
+            onChange={(e) => setLoginInput(e.target.value)}
+          />
+          <button
+            className="bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded w-full"
+            onClick={() => {
+              setTok(loginInput);
+              verifyAgent(loginInput);
+            }}
+          >
+            Login
+          </button>
+          {status && <p className="text-center text-sm text-red-500 mt-2">{status}</p>}
         </div>
       </div>
     );
-  }
 
-  const activeChat = useMemo(
-    () => chats.find((c) => c.user_id === selected) || null,
-    [chats, selected]
-  );
-
+  // ---------------- Main UI ----------------
   return (
-    <div className="flex h-screen bg-neutral-50 text-neutral-900 dark:bg-[#0b141a] dark:text-[#e9edef]">
-      <Header
-        name={agentName}
-        status={status}
-        syncing={syncing}
-        theme={theme}
-        onToggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")}
-        onLogout={handleLogout}
-        onRefresh={loadChats}
-      />
+    <div
+      className={`flex h-screen ${
+        darkMode ? "bg-slate-900 text-white" : "bg-gray-100 text-gray-900"
+      }`}
+    >
+      {/* Sidebar */}
+      <div
+        className={`w-72 border-r flex flex-col ${
+          darkMode ? "border-slate-700 bg-slate-800" : "border-gray-300 bg-white"
+        }`}
+      >
+        <div className="p-5 flex items-center justify-center border-b">
+          <img src="/kommu_logo.png" alt="Kommu Logo" className="w-28" />
+        </div>
+        <div className="p-3 flex justify-between items-center border-b">
+          <div>
+            <h2 className="font-semibold">Welcome, {agent}</h2>
+            <button
+              onClick={() => {
+                clearToken();
+                setTok(null);
+              }}
+              className="text-xs text-red-500 hover:underline"
+            >
+              Logout
+            </button>
+          </div>
+          <button
+            onClick={() => setDarkMode(!darkMode)}
+            className={`text-xs px-3 py-1 rounded ${
+              darkMode ? "bg-slate-700 text-white" : "bg-gray-200 text-gray-800"
+            }`}
+          >
+            {darkMode ? "Light" : "Dark"}
+          </button>
+        </div>
 
-      <div className="flex flex-1 overflow-hidden">
-        <ChatList
-          chats={chats}
-          selected={selected}
-          onSelect={setSelected}
-          searchTerm={searchTerm}
-          onSearchTerm={setSearchTerm}
-        />
-
-        <main className="flex-1 flex flex-col">
-          {selected && activeChat ? (
-            <>
-              {/* Chat header strip */}
-              <div className="px-6 py-3 border-b border-neutral-200 dark:border-[#1f2c33] bg-white dark:bg-[#202c33]">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <img
-                      src={activeChat.profile_pic || "/default-avatar.png"}
-                      className="h-10 w-10 rounded-full object-cover bg-neutral-200 dark:bg-[#111b21]"
-                      alt=""
-                    />
-                    <div>
-                      <p className="text-sm font-semibold">
-                        {activeChat.name || activeChat.user_id}
-                      </p>
-                      <p className="text-xs text-neutral-500 dark:text-[#8696a0]">
-                        {activeChat.user_id}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span
-                      className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-semibold ${
-                        activeChat.frozen
-                          ? "bg-amber-100 text-amber-700 dark:bg-amber-400/10 dark:text-amber-300"
-                          : "bg-emerald-100 text-emerald-700 dark:bg-emerald-400/10 dark:text-emerald-300"
-                      }`}
-                    >
-                      {activeChat.frozen ? "Human takeover active" : "Chatbot responding"}
-                    </span>
-                    <button
-                      onClick={handleFreeze}
-                      className="rounded-md border border-neutral-300 dark:border-[#1f2c33] bg-white dark:bg-[#111b21] px-3 py-1 text-sm hover:bg-neutral-50 dark:hover:bg-[#1a242b]"
-                      disabled={false}
-                      title="Send LA to freeze chatbot"
-                    >
-                      Live Agent
-                    </button>
-                    <button
-                      onClick={handleResume}
-                      className="rounded-md bg-[#2a5cff] px-3 py-1 text-sm font-semibold text-white hover:opacity-90"
-                      title="Send resume to unfreeze"
-                    >
-                      Resume Bot
-                    </button>
-                  </div>
+        {/* Chat list */}
+        <div className="flex-1 overflow-y-auto">
+          {chats.map((c) => (
+            <div
+              key={c.user_id}
+              onClick={() => loadChat(c.user_id)}
+              className={`cursor-pointer flex items-center gap-3 p-2 border-b ${
+                selected === c.user_id
+                  ? darkMode
+                    ? "bg-slate-700"
+                    : "bg-blue-100"
+                  : darkMode
+                  ? "hover:bg-slate-700/50"
+                  : "hover:bg-gray-100"
+              }`}
+            >
+              {c.profile_pic ? (
+                <img src={c.profile_pic} className="w-10 h-10 rounded-full object-cover" />
+              ) : (
+                <div
+                  className={`w-10 h-10 rounded-full flex items-center justify-center text-sm font-semibold border ${
+                    darkMode
+                      ? "border-slate-600 bg-slate-700"
+                      : "border-gray-300 bg-gray-100"
+                  }`}
+                >
+                  {c.name ? c.name[0].toUpperCase() : "?"}
+                </div>
+              )}
+              <div className="flex-1 min-w-0">
+                <div className="font-semibold truncate">{c.name}</div>
+                <div className="text-xs truncate opacity-70">
+                  {c.lastMessage || "No messages yet"}
                 </div>
               </div>
 
-              <ChatWindow messages={messages} />
+              {/* unread badge */}
+              {unreadCounts[c.user_id] > 0 && (
+                <span className="bg-blue-600 text-white text-xs font-bold rounded-full px-2 py-0.5">
+                  {unreadCounts[c.user_id]}
+                </span>
+              )}
 
-              <MessageInput
-                value={draft}
-                onChange={setDraft}
-                onSend={handleSend}
-                disabled={false /* agent can always reply */}
-              />
-            </>
-          ) : (
-            <div className="flex flex-1 items-center justify-center">
-              <div className="max-w-lg text-center">
-                <h2 className="text-xl font-semibold">Select a conversation</h2>
-                <p className="mt-2 text-sm text-neutral-500 dark:text-[#8696a0]">
-                  Pick a chat from the left to review and reply. Use the “Live Agent” button to
-                  request takeover (LA), and “Resume Bot” to continue automation.
-                </p>
+              <span
+                className={`text-xs font-medium ${
+                  c.frozen ? "text-amber-500" : "text-green-500"
+                }`}
+              >
+                {c.frozen ? "Human" : "Bot"}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Chat Area */}
+      <div className="flex-1 flex flex-col">
+        <div className="flex justify-between items-center p-3 border-b">
+          <h2 className="font-semibold">
+            {selected
+              ? chats.find((c) => c.user_id === selected)?.name || selected
+              : "Select a chat"}
+          </h2>
+          {selected && (
+            <div className="flex gap-2 items-center">
+              <button
+                onClick={() => setChatMode("human")}
+                className="bg-amber-500 hover:bg-amber-600 text-white px-3 py-1 rounded text-xs"
+              >
+                Live Agent
+              </button>
+              <button
+                onClick={() => setChatMode("bot")}
+                className="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded text-xs"
+              >
+                Resume Bot
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Messages */}
+        <div
+          id="chat-scroll"
+          ref={scrollRef}
+          className={`flex-1 overflow-y-auto p-6 space-y-4 ${
+            darkMode ? "bg-slate-900" : "bg-gray-50"
+          }`}
+        >
+          {messages.map((m, i) => {
+            const isUser = m.sender === "user";
+            const isAgent = m.sender === "agent";
+            const isBot = m.sender === "bot";
+            const align = isUser ? "justify-start" : "justify-end";
+            const bubbleColor = isAgent
+              ? "bg-blue-600 text-white"
+              : isBot
+              ? "bg-emerald-200 text-emerald-900"
+              : "bg-gray-200 text-gray-900";
+            const content = renderMessageContent(m.content, i, darkMode);
+            return (
+              <div key={i} className={`flex ${align} my-2`}>
+                <div className={`max-w-[75%] rounded-2xl px-4 py-2 shadow-sm ${bubbleColor}`}>
+                  <div className="text-sm leading-relaxed break-words whitespace-pre-wrap">
+                    {content}
+                  </div>
+                  <div
+                    className={`text-[10px] mt-1 text-right ${
+                      darkMode ? "text-gray-400" : "text-gray-500"
+                    }`}
+                  >
+                    {m.time}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+
+          {botTyping && (
+            <div className="flex justify-end">
+              <div
+                className={`px-4 py-2 rounded-2xl text-sm ${
+                  darkMode
+                    ? "bg-emerald-400/20 text-emerald-200"
+                    : "bg-emerald-100 text-emerald-800"
+                }`}
+              >
+                <span className="animate-pulse">Kai is typing…</span>
               </div>
             </div>
           )}
-        </main>
+        </div>
+
+        {/* Input */}
+        {selected && (
+          <div
+            className={`flex items-center gap-2 border-t p-3 ${
+              darkMode ? "border-slate-700 bg-slate-800" : "border-gray-300 bg-white"
+            }`}
+          >
+            <input
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && sendMessage()}
+              placeholder="Type a message..."
+              className={`flex-1 p-2 rounded border text-sm ${
+                darkMode
+                  ? "bg-slate-700 border-slate-600 text-white"
+                  : "bg-white border-gray-300 text-gray-900"
+              }`}
+              disabled={loading}
+            />
+            <button
+              onClick={sendMessage}
+              disabled={loading}
+              className={`px-4 py-2 rounded text-white ${
+                loading
+                  ? "bg-gray-400 cursor-not-allowed"
+                  : "bg-blue-600 hover:bg-blue-700"
+              }`}
+            >
+              Send
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
+}
+
+/* ---------------- Media Renderer ---------------- */
+function renderMessageContent(raw: string, i: number, darkMode: boolean) {
+  const text = raw || "";
+  const API_BASE = import.meta.env.VITE_API_BASE || "https://api.kommu.ai/api";
+  const mediaUrl = () =>
+    text.split("Saved at:")[1]?.trim().replace("/app", API_BASE) || "";
+
+  if (text.includes("[IMAGE]") && text.includes("Saved at:")) {
+    const url = mediaUrl();
+    return (
+      <img
+        key={`img-${i}`}
+        src={url}
+        alt="Image"
+        className="max-w-[220px] rounded-lg border border-gray-400/40"
+      />
+    );
+  }
+  if (text.includes("[AUDIO]") && text.includes("Saved at:")) {
+    const url = mediaUrl();
+    return (
+      <audio key={`aud-${i}`} controls className="max-w-[220px]">
+        <source src={url} type="audio/ogg" />
+        Audio not supported.
+      </audio>
+    );
+  }
+  if (text.includes("[VIDEO]") && text.includes("Saved at:")) {
+    const url = mediaUrl();
+    return (
+      <video
+        key={`vid-${i}`}
+        controls
+        className="max-w-[240px] rounded-lg border border-gray-400/40"
+      >
+        <source src={url} type="video/mp4" />
+        Video not supported.
+      </video>
+    );
+  }
+  if (text.includes("[DOCUMENT]") && text.includes("Saved at:")) {
+    const url = mediaUrl();
+    const name = url.split("/").pop();
+    return (
+      <a
+        key={`doc-${i}`}
+        href={url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="underline text-blue-500"
+      >
+        📎 {name}
+      </a>
+    );
+  }
+  return text;
 }
