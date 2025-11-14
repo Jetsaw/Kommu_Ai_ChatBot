@@ -224,34 +224,59 @@ def verify_agent_token(token: str) -> str | None:
     return AGENT_TOKENS.get(token)
 
 def list_sessions():
+    """Return all valid sessions, cleaning corrupted ones automatically."""
     db_path = "/app/data/sessions.db"
     rows = []
     try:
         if not os.path.exists(db_path):
             print(f"[WARN] Database not found: {db_path}", flush=True)
             return []
+
         conn = sqlite3.connect(db_path)
         cur = conn.cursor()
         cur.execute("SELECT user_id, data FROM sessions")
-        for user_id, data in cur.fetchall():
+        all_sessions = cur.fetchall()
+
+        for user_id, data in all_sessions:
             try:
                 sess = json.loads(data)
                 hist = sess.get("history", [])
                 last = hist[-1]["text"] if hist else ""
+
+                #  Safe timestamp fallback
+                last_time = (
+                    hist[-1].get("time")
+                    if hist and isinstance(hist[-1], dict)
+                    else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                )
+
+                #  Append valid session
                 rows.append({
                     "user_id": user_id,
                     "name": sess.get("name", user_id),
                     "profile_pic": sess.get("profile_pic", ""),
                     "lastMessage": last,
+                    "lastMessageTime": last_time,
                     "frozen": sess.get("frozen", False),
                     "lang": sess.get("lang", "EN")
                 })
+
             except Exception as e:
-                print(f"[WARN] Skipped bad session {user_id}: {e}", flush=True)
+                print(f"[CLEANUP] Removing corrupted session {user_id}: {e}", flush=True)
+                try:
+                    cur.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+                    conn.commit()
+                except Exception as db_err:
+                    print(f"[CLEANUP ERROR] Failed to delete {user_id}: {db_err}", flush=True)
+                continue
+
         conn.close()
+
     except Exception as e:
         print(f"[ERROR] list_sessions failed: {e}", flush=True)
+
     return rows
+
 
 def get_chat_history(user_id: str):
     db_path = "/app/data/sessions.db"
